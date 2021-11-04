@@ -46,6 +46,7 @@ public class NamesrvController {
 
     private final NettyServerConfig nettyServerConfig;
 
+
     private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactoryImpl(
         "NSScheduledThread"));
     private final KVConfigManager kvConfigManager;
