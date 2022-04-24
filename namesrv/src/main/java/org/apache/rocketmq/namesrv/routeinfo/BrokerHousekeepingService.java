@@ -32,6 +32,7 @@ public class BrokerHousekeepingService implements ChannelEventListener {
     }
 
     @Override
+    @Deprecated
     public void onChannelConnect(String remoteAddr, Channel channel) {
     }
 

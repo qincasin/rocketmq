@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.common.message.Message;
 
 public class RequestResponseFuture {
+    //请求id
     private final String correlationId;
     private final RequestCallback requestCallback;
     private final long beginTimestamp = System.currentTimeMillis();
