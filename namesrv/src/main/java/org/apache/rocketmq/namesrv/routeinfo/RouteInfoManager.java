@@ -99,6 +99,19 @@ public class RouteInfoManager {
         return topicList.encode();
     }
 
+    // 参数1：群
+    // 参数2：节点ip地址
+    // 参数3：brokerName
+    // 参数4：brokerId，注意0 的 brokerId 的节点为主节点
+    // 参数5：ha 节点 ip信息
+    // 参数6：当前节点的主题信息
+    // 参数7：过滤服务器列表... 以后在说
+    // 参数7：当年服务器 和 客户端 通信的channel
+
+    /**
+     * 主要是做注册方法
+     */
+
     public RegisterBrokerResult registerBroker(
         final String clusterName,
         final String brokerAddr,
@@ -108,46 +121,61 @@ public class RouteInfoManager {
         final TopicConfigSerializeWrapper topicConfigWrapper,
         final List<String> filterServerList,
         final Channel channel) {
+        //返回结果
         RegisterBrokerResult result = new RegisterBrokerResult();
         try {
             try {
                 this.lock.writeLock().lockInterruptibly();
-
+                //获取当前集群上的broker 列表
                 Set<String> brokerNames = this.clusterAddrTable.get(clusterName);
                 if (null == brokerNames) {
                     brokerNames = new HashSet<String>();
+                    //添加新集群 映射数据
+                    //key是集群名称
+                    //value 是集群集合set
                     this.clusterAddrTable.put(clusterName, brokerNames);
                 }
+                //将当前broker 加入集群set 内
                 brokerNames.add(brokerName);
 
+                //是否为第一次注册
                 boolean registerFirst = false;
 
                 BrokerData brokerData = this.brokerAddrTable.get(brokerName);
                 if (null == brokerData) {
+                    //为null 说明第一次注册
                     registerFirst = true;
+                    //创建brokerData
                     brokerData = new BrokerData(clusterName, brokerName, new HashMap<Long, String>());
+                    //将broker 映射数据 加入 broker 映射表内
                     this.brokerAddrTable.put(brokerName, brokerData);
                 }
+                //获取broker 物理节点 map表
                 Map<Long, String> brokerAddrsMap = brokerData.getBrokerAddrs();
                 //Switch slave to master: first remove <1, IP:PORT> in namesrv, then add <0, IP:PORT>
                 //The same IP:PORT must only have one record in brokerAddrTable
                 Iterator<Entry<Long, String>> it = brokerAddrsMap.entrySet().iterator();
                 while (it.hasNext()) {
                     Entry<Long, String> item = it.next();
+                    //条件成立 说明 物理节点 角色发生变化了， 这个时候需要将它从broker物理节点map中移除
                     if (null != brokerAddr && brokerAddr.equals(item.getValue()) && brokerId != item.getKey()) {
                         it.remove();
                     }
                 }
 
+                //重写
                 String oldAddr = brokerData.getBrokerAddrs().put(brokerId, brokerAddr);
                 registerFirst = registerFirst || (null == oldAddr);
 
+                //条件成立说明  broker 上的主题不为null， 并且当前物理节点是 broker 上的master 节点
                 if (null != topicConfigWrapper
                     && MixAll.MASTER_ID == brokerId) {
                     if (this.isBrokerTopicConfigChanged(brokerAddr, topicConfigWrapper.getDataVersion())
                         || registerFirst) {
+                        //获取当前broker信息中的 主题映射表，从broker 注册数据获取
                         ConcurrentMap<String, TopicConfig> tcTable =
                             topicConfigWrapper.getTopicConfigTable();
+                        //加入或者更新到nameserver内
                         if (tcTable != null) {
                             for (Map.Entry<String, TopicConfig> entry : tcTable.entrySet()) {
                                 this.createAndUpdateQueueData(brokerName, entry.getValue());
@@ -156,7 +184,10 @@ public class RouteInfoManager {
                     }
                 }
 
+                //添加 当前节点的 brokerLiveInfo，会有定时任务 扫描 这个映射表
+                //返回上一次 心跳时  当前broker节点的存活对象数据
                 BrokerLiveInfo prevBrokerLiveInfo = this.brokerLiveTable.put(brokerAddr,
+
                     new BrokerLiveInfo(
                         System.currentTimeMillis(),
                         topicConfigWrapper.getDataVersion(),
@@ -175,6 +206,9 @@ public class RouteInfoManager {
                 }
 
                 if (MixAll.MASTER_ID != brokerId) {
+                    //执行到这里 说明当前brokerId != 0
+
+                    //获取broker 主节点的 物理地址
                     String masterAddr = brokerData.getBrokerAddrs().get(MixAll.MASTER_ID);
                     if (masterAddr != null) {
                         BrokerLiveInfo brokerLiveInfo = this.brokerLiveTable.get(masterAddr);
@@ -185,12 +219,14 @@ public class RouteInfoManager {
                     }
                 }
             } finally {
+                //释放写锁
                 this.lock.writeLock().unlock();
             }
         } catch (Exception e) {
             log.error("registerBroker Exception", e);
         }
 
+        //返回写锁
         return result;
     }
 
@@ -302,6 +338,7 @@ public class RouteInfoManager {
                     brokerAddr
                 );
 
+                //移除掉过滤掉服务器信息
                 this.filterServerTable.remove(brokerAddr);
 
                 boolean removeBrokerName = false;
@@ -319,6 +356,7 @@ public class RouteInfoManager {
                             brokerName
                         );
 
+                        //broker上面挂在的所有物理节点都被移除掉后，该值就被设置为true
                         removeBrokerName = true;
                     }
                 }
@@ -435,11 +473,19 @@ public class RouteInfoManager {
                 RemotingUtil.closeChannel(next.getValue().getChannel());
                 it.remove();
                 log.warn("The broker channel expired, {} {}ms", next.getKey(), BROKER_CHANNEL_EXPIRED_TIME);
+                /**
+                 * 参数1 brokerAddr
+                 * 参数2 服务器与broker物理节点的 ch
+                 */
                 this.onChannelDestroy(next.getKey(), next.getValue().getChannel());
             }
         }
     }
 
+    /**
+     * 参数1 brokerAddr
+     * 参数2 服务器与broker物理节点的 ch
+     */
     public void onChannelDestroy(String remoteAddr, Channel channel) {
         String brokerAddrFound = null;
         if (channel != null) {

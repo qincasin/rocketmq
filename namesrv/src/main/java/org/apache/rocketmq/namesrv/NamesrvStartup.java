@@ -59,6 +59,7 @@ public class NamesrvStartup {
             //namesrv 控制器 ： 初始化 namesrv 启动 namesrv 关闭 namesrv...
             //读取配置信息 ，初始化 控制器
             NamesrvController controller = createNamesrvController(args);
+
             //
             start(controller);
             String tip = "The Name Server boot success. serializeType=" + RemotingCommand.getSerializeTypeConfigInThisServer();
@@ -78,6 +79,7 @@ public class NamesrvStartup {
         //PackageConflictDetect.detectFastjson();
 
         Options options = ServerUtil.buildCommandlineOptions(new Options());
+        //启动时的参数信息由 commandLine管理了
         commandLine = ServerUtil.parseCmdLine("mqnamesrv", args, buildCommandlineOptions(options), new PosixParser());
         if (null == commandLine) {
             System.exit(-1);
@@ -94,10 +96,12 @@ public class NamesrvStartup {
             //读取 -c 选项的值
             String file = commandLine.getOptionValue('c');
             if (file != null) {
+
                 //读取config 文件数据 到properties 内
                 InputStream in = new BufferedInputStream(new FileInputStream(file));
                 properties = new Properties();
                 properties.load(in);
+
                 //如果config 配置文件 内的 配置 涉及到 namesrvConfig 或者 netty serverConfig 的字段，那么进行重写
                 MixAll.properties2Object(properties, namesrvConfig);
                 MixAll.properties2Object(properties, nettyServerConfig);
@@ -117,6 +121,7 @@ public class NamesrvStartup {
             System.exit(0);
         }
 
+        //将启动时命令行设置的kv 复写到 namesrvConfig内
         MixAll.properties2Object(ServerUtil.commandLine2Properties(commandLine), namesrvConfig);
 
         if (null == namesrvConfig.getRocketmqHome()) {
@@ -124,6 +129,7 @@ public class NamesrvStartup {
             System.exit(-2);
         }
 
+        //创建日志对象
         LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
         JoranConfigurator configurator = new JoranConfigurator();
         configurator.setContext(lc);
@@ -135,6 +141,9 @@ public class NamesrvStartup {
         MixAll.printObjectProperties(log, namesrvConfig);
         MixAll.printObjectProperties(log, nettyServerConfig);
 
+        //创建 控制器
+        //参数1 namesrvConfig
+        //参数2 网络层配置
         final NamesrvController controller = new NamesrvController(namesrvConfig, nettyServerConfig);
 
         // remember all configs to prevent discard
@@ -165,6 +174,7 @@ public class NamesrvStartup {
             }
         }));
 
+        //启动服务器
         controller.start();
 
         return controller;

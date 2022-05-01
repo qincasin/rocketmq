@@ -75,14 +75,15 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
     private final NettyServerConfig nettyServerConfig;
     //公共线程池  注册处理器时   如果未指定 线程池， 则使用公共线程池
     private final ExecutorService publicExecutor;
-    //HouseKeepingService ,BrokerHouseKeepingService(nameserver 使用),ClientHouseKeepingService(broker 使用)
+    //HouseKeepingService ,有两个 一个是 BrokerHouseKeepingService(nameserver 使用),一个是ClientHouseKeepingService(broker 使用);;;;监听与broker的连接状态的
     private final ChannelEventListener channelEventListener;
-    //定时器  执行scanResponseTable 任务
+    //定时器  执行scanResponseTable 任务;服务端和客户端进行通讯时，会向ResponseFuture中添加key,value键值对，key是 opaque ，value是ResponseFuture,
+    // 这里定时任务是用于清理清理过期的ResponseFuture的
     private final Timer timer = new Timer("ServerHouseKeepingService", true);
-    // 当向 channel pipeline 添加 handler 时  指定了group 时，网络事件传播到 当前handler 时，事件处理由 分配给 handler 的线程执行
+    // 当向 channel pipeline 添加 handler 时  指定了group 时，网络事件传播到 当前handler 时，事件处理 由 分配给 handler 的线程执行
     private DefaultEventExecutorGroup defaultEventExecutorGroup;
 
-    // 服务端绑定的 端口
+    // 服务端绑定的 端口  这个在启动之后会被 nettyServerConfig中的端口替代
     private int port = 0;
 
     private static final String HANDSHAKE_HANDLER_NAME = "handshakeHandler";
@@ -103,8 +104,8 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
     public NettyRemotingServer(final NettyServerConfig nettyServerConfig,
         final ChannelEventListener channelEventListener) {
         //服务器 向客户端主动发起请求时 并发限制
-        //1.单向请求的并发限制
-        //2.异步请求的并发限制
+        //1.单向请求的并发限制  256
+        //2.异步请求的并发限制  64
         super(nettyServerConfig.getServerOnewaySemaphoreValue(), nettyServerConfig.getServerAsyncSemaphoreValue());
         this.serverBootstrap = new ServerBootstrap();
         this.nettyServerConfig = nettyServerConfig;
@@ -192,6 +193,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
     }
 
     @Override
+    //客户端或者服务端 网络启动
     public void start() {
         // 当向 channel pipeline 添加 handler 时  指定了group 时，网络事件传播到 当前handler 时，事件处理由 分配给 handler 的线程执行
         this.defaultEventExecutorGroup = new DefaultEventExecutorGroup(
@@ -213,7 +215,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                 //配置服务端启动对象
                 //配置工作组boss 和 worker 组
             this.serverBootstrap.group(this.eventLoopGroupBoss, this.eventLoopGroupSelector)
-                    //设置服务端 ServerSOcketChannel 类型
+                    //设置服务端 ServerSocketChannel 类型,这里如果是使用了 linux系统的话，会优先使用EpollServerSocketChannel
                 .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)
                     //设置服务端ch 选项
                 .option(ChannelOption.SO_BACKLOG, 1024)
@@ -221,8 +223,8 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                 .option(ChannelOption.SO_KEEPALIVE, false)
                     //客户端ch选项
                 .childOption(ChannelOption.TCP_NODELAY, true)
-                .childOption(ChannelOption.SO_SNDBUF, nettyServerConfig.getServerSocketSndBufSize())
-                .childOption(ChannelOption.SO_RCVBUF, nettyServerConfig.getServerSocketRcvBufSize())
+                .childOption(ChannelOption.SO_SNDBUF, nettyServerConfig.getServerSocketSndBufSize())  //配置写缓冲 大小 65536
+                .childOption(ChannelOption.SO_RCVBUF, nettyServerConfig.getServerSocketRcvBufSize())  //配置 读缓冲区 大小 65536
                     //设置服务器端口
                 .localAddress(new InetSocketAddress(this.nettyServerConfig.getListenPort()))
                 .childHandler(new ChannelInitializer<SocketChannel>() {
@@ -230,6 +232,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
                     public void initChannel(SocketChannel ch) throws Exception {
                         //初始化 客户端 ch pipeline的逻辑
                         ch.pipeline()
+                                // 如下的handler 在加的时候都指定了 线程组，并没有使用IO 线程去执行
                             .addLast(defaultEventExecutorGroup, HANDSHAKE_HANDLER_NAME, handshakeHandler)
                             .addLast(defaultEventExecutorGroup,
                                 encoder,
@@ -256,7 +259,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         } catch (InterruptedException e1) {
             throw new RuntimeException("this.serverBootstrap.bind().sync() InterruptedException", e1);
         }
-
+        // =============================== nettyEventExecutor 启动 =========================================
         //housekeepingService 不为空  则创建 网络异常事件 处理器
         if (this.channelEventListener != null) {
             //  这个里面会执行run 方法，里面处理队列中的事件
@@ -265,7 +268,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         }
 
         //提交定时任务，每一秒执行一次，
-        //扫描responseFuture 表，将过期的responseFuture 移处
+        //扫描responseFuture 表，将过期的 responseFuture 移处
         this.timer.scheduleAtFixedRate(new TimerTask() {
 
             @Override
@@ -326,6 +329,7 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
     @Override
     public void registerProcessor(int requestCode, NettyRequestProcessor processor, ExecutorService executor) {
         ExecutorService executorThis = executor;
+        // 如果 executor 为空的话，就将公共线程池 赋值给  executorThis
         if (null == executor) {
             executorThis = this.publicExecutor;
         }
@@ -364,6 +368,10 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
     /**
      * 服务器 主动向 客户端 发起请求时  使用方法  ,当前方法是同步调用 ，什么是同步调用？
      * 服务器 业务线程 需要在这里 等待client 返回给结果之后  整个调用才完毕
+     * //   同步调用解释   ----> 同步调用就是业务线程能在执行完该方法后能够拿到客户端返回的结果；
+     * 这里其实是使用了一个CountDownLatch，让业务线程进入挂起状态，然后服务器在收到这个业务结果之后再根据opaque的值找到对应的ResponseFuture，
+     * 如果拿到的ResponseFuture不为空，则执行ResponseFuture.putResponse()操作，这个操作会执行countDownLatch.countDown();操作进行唤醒业务线程。
+     * 这个时候业务线程继续往下面执行，判断拿到的responseCommand不为空，则同步返回了，这个时候就拿到了客户端返回的结果了。
      * @param channel 客户端 ch
      * @param request 网络请求体 RemotingCommand
      * @param timeoutMillis 超时时长
@@ -395,6 +403,16 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
         this.invokeAsyncImpl(channel, request, timeoutMillis, invokeCallback);
     }
 
+    /**
+     * 服务器 主动 向客户端发起请求时，注意 此方法，不关注结果   (单向请求)
+     * @param channel  客户端ch
+     * @param request  网络请求对象 remotingCommand对象
+     * @param timeoutMillis  请求时长
+     * @throws InterruptedException
+     * @throws RemotingTooMuchRequestException
+     * @throws RemotingTimeoutException
+     * @throws RemotingSendRequestException
+     */
     @Override
     public void invokeOneway(Channel channel, RemotingCommand request, long timeoutMillis) throws InterruptedException,
         RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {

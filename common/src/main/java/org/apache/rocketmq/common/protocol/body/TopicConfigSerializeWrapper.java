@@ -23,6 +23,7 @@ import org.apache.rocketmq.common.DataVersion;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
+// 记录当前节点， 有多少主题，当前主题在该节点 有多少队列
 public class TopicConfigSerializeWrapper extends RemotingSerializable {
     private ConcurrentMap<String, TopicConfig> topicConfigTable =
         new ConcurrentHashMap<String, TopicConfig>();

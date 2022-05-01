@@ -54,6 +54,7 @@ public class RemotingCommand {
     private static final String BOOLEAN_CANONICAL_NAME_1 = Boolean.class.getCanonicalName();
     private static final String BOOLEAN_CANONICAL_NAME_2 = boolean.class.getCanonicalName();
     private static volatile int configVersion = -1;
+    //请求id
     private static AtomicInteger requestId = new AtomicInteger(0);
 
     private static SerializeType serializeTypeConfigInThisServer = SerializeType.JSON;
@@ -113,13 +114,16 @@ public class RemotingCommand {
     public static RemotingCommand createResponseCommand(int code, String remark,
         Class<? extends CommandCustomHeader> classHeader) {
         RemotingCommand cmd = new RemotingCommand();
+        // 设置它是一个响应类型的请求
         cmd.markResponseType();
+        //设置它的业务代码
         cmd.setCode(code);
         cmd.setRemark(remark);
         setCmdVersion(cmd);
 
         if (classHeader != null) {
             try {
+                //创建 用户自定义的 header对象
                 CommandCustomHeader objectHeader = classHeader.newInstance();
                 cmd.customHeader = objectHeader;
             } catch (InstantiationException e) {
@@ -243,7 +247,7 @@ public class RemotingCommand {
         }
 
         if (this.extFields != null) {
-
+            //将header中的extFields 中字段，通过反射获取到，然后将其设置到 customHeader当中
             Field[] fields = getClazzFields(classHeader);
             for (Field field : fields) {
                 if (!Modifier.isStatic(field.getModifiers())) {
@@ -429,6 +433,7 @@ public class RemotingCommand {
         return result;
     }
 
+    //使用位运算 打了个标记，
     public void markOnewayRPC() {
         int bits = 1 << RPC_ONEWAY;
         this.flag |= bits;

@@ -55,13 +55,13 @@ public class NamesrvController {
     //管理路由信息的对象， 重要
     private final RouteInfoManager routeInfoManager;
 
-    //网络层封装对象  重要
+    //网络层封装对象  非常重要
     private RemotingServer remotingServer;
 
     //ChannelEventListener 用于监听channel状态， 当channel状态 发生改变时， close idle ... 等等， 会向事件队列发起事件，事件最终由 该service 处理
     private BrokerHousekeepingService brokerHousekeepingService;
 
-    //业务线程池    netty线程 主要任务 是 解析报文 将报文 解析成RemotingCommand 对象， 然后就将该对象 交给 业务 线程池 再继续处理
+    //业务线程池    netty线程 主要任务 是 解析报文 将报文 解析成 RemotingCommand 对象， 然后就将该对象 交给 业务 线程池 再继续处理
     private ExecutorService remotingExecutor;
 
     private Configuration configuration;
@@ -160,6 +160,7 @@ public class NamesrvController {
     }
 
     private void registerProcessor() {
+        //本次不会走到
         if (namesrvConfig.isClusterTest()) {
 
             this.remotingServer.registerDefaultProcessor(new ClusterTestRequestProcessor(this, namesrvConfig.getProductEnvName()),
@@ -173,7 +174,7 @@ public class NamesrvController {
     }
 
     public void start() throws Exception {
-        //服务器网络层启动
+        //服务器网络层启动  ,在看这个逻辑之前需要先搞清楚 remotingServer 这个到底是干嘛的
         this.remotingServer.start();
 
         if (this.fileWatchService != null) {

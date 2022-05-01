@@ -22,8 +22,10 @@ import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
 public abstract class AsyncNettyRequestProcessor implements NettyRequestProcessor {
 
+    // 名字是异步的，但其实是同步调用的，，，除非 子类覆盖这个方法， 回头我们看broker 方法时 ，会看到覆盖的实现
     public void asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request, RemotingResponseCallback responseCallback) throws Exception {
         RemotingCommand response = processRequest(ctx, request);
+        //进入到响应客户端的逻辑入口
         responseCallback.callback(response);
     }
 }

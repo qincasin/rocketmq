@@ -41,6 +41,9 @@ public class KVConfigManager {
         this.namesrvController = namesrvController;
     }
 
+    /**
+     * 主要是读取本地kv配置文件中的数据，如果存在的话，就将其解析到 configTable 当中去
+     */
     public void load() {
         String content = null;
         try {
