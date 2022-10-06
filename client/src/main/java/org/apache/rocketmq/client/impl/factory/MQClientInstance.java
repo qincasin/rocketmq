@@ -87,35 +87,60 @@ import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 public class MQClientInstance {
     private final static long LOCK_TIMEOUT_MILLIS = 3000;
     private final InternalLogger log = ClientLogger.getLog();
+    //客户端配置
     private final ClientConfig clientConfig;
+    //索引值，一般是0，因为客户端实例一般都是一个进程，只有一个
     private final int instanceIndex;
+    //客户端启动时间
     private final String clientId;
+    //客户端启动时间
     private final long bootTimestamp = System.currentTimeMillis();
+    //映射表； 生产者映射表、消费者映射表 ；key 组名；value：生产者或者消费者
     private final ConcurrentMap<String/* group */, MQProducerInner> producerTable = new ConcurrentHashMap<String, MQProducerInner>();
     private final ConcurrentMap<String/* group */, MQConsumerInner> consumerTable = new ConcurrentHashMap<String, MQConsumerInner>();
     private final ConcurrentMap<String/* group */, MQAdminExtInner> adminExtTable = new ConcurrentHashMap<String, MQAdminExtInner>();
+    //客户端网络层的配置
     private final NettyClientConfig nettyClientConfig;
+    //核心的一个 API实现，它几乎包含了 所有服务端的API，它的作用就是MQ业务层的数据 转换为网络层 RemotingCommand 对象，
+    //然后使用内部NettyRemotingClient 的invoke 系列方法，完成网络IO。
     private final MQClientAPIImpl mQClientAPIImpl;
     private final MQAdminImpl mQAdminImpl;
+    //客户端本地路由数据
+    //key:主题名称
+    //value：主题路由数据
     private final ConcurrentMap<String/* Topic */, TopicRouteData> topicRouteTable = new ConcurrentHashMap<String, TopicRouteData>();
     private final Lock lockNamesrv = new ReentrantLock();
     private final Lock lockHeartbeat = new ReentrantLock();
+    //broker 物理节点映射表
+    //key brokerName 逻辑层面的东西
+    //value map <Long/* brokerId 0 的阶段是master，其他是slave*/, String/* address addr ip:port */>
     private final ConcurrentMap<String/* Broker Name */, HashMap<Long/* brokerId */, String/* address */>> brokerAddrTable =
         new ConcurrentHashMap<String, HashMap<Long, String>>();
+    //broker 物理节点版本映射表
+    //key:brokerName 逻辑层面的东西
+    //value: map<String/* address * Broker Name * addr 物理节点地址 /, Integer 版本号>
     private final ConcurrentMap<String/* Broker Name */, HashMap<String/* address */, Integer>> brokerVersionTable =
         new ConcurrentHashMap<String, HashMap<String, Integer>>();
+    //单线程的调度线程池，用于执行定时任务；也算是当前类的一个核心
     private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
         @Override
         public Thread newThread(Runnable r) {
             return new Thread(r, "MQClientFactoryScheduledThread");
         }
     });
+
+    //客户端协议处理器，用户处理IO事件
     private final ClientRemotingProcessor clientRemotingProcessor;
+    //拉消息服务
     private final PullMessageService pullMessageService;
+    //消费者负载均衡服务
     private final RebalanceService rebalanceService;
+    //内部生产者实例，用于处理消费端消息回退
     private final DefaultMQProducer defaultMQProducer;
     private final ConsumerStatsManager consumerStatsManager;
+    //心跳次数的统计
     private final AtomicLong sendHeartbeatTimesTotal = new AtomicLong(0);
+    //RocketMQ 客户端状态
     private ServiceState serviceState = ServiceState.CREATE_JUST;
     private Random random = new Random();
 
@@ -129,8 +154,17 @@ public class MQClientInstance {
         this.nettyClientConfig = new NettyClientConfig();
         this.nettyClientConfig.setClientCallbackExecutorThreads(clientConfig.getClientCallbackExecutorThreads());
         this.nettyClientConfig.setUseTLS(clientConfig.isUseTLS());
+
+        //创建客户端协议处理器 ---> 协议处理器可以处理哪些业务 详见 ClientRemotingProcessor#processRequest
         this.clientRemotingProcessor = new ClientRemotingProcessor(this);
+        //创建API实现对象
+        //参数1 客户端网络配置
+        //参数2 客户端协议处理器，要注册到 客户端网络层
+        //参数3 rpcHook 注册到 客户端网络层
+        //参数4 客户端配置
         this.mQClientAPIImpl = new MQClientAPIImpl(this.nettyClientConfig, this.clientRemotingProcessor, rpcHook, clientConfig);
+
+
 
         if (this.clientConfig.getNamesrvAddr() != null) {
             this.mQClientAPIImpl.updateNameServerAddressList(this.clientConfig.getNamesrvAddr());
@@ -145,6 +179,7 @@ public class MQClientInstance {
 
         this.rebalanceService = new RebalanceService(this);
 
+        //创建了一个内部生产者实例，来完成消息回退时使用的 生产者对象
         this.defaultMQProducer = new DefaultMQProducer(MixAll.CLIENT_INNER_PRODUCER_GROUP);
         this.defaultMQProducer.resetClientConfig(clientConfig);
 
@@ -226,12 +261,14 @@ public class MQClientInstance {
         synchronized (this) {
             switch (this.serviceState) {
                 case CREATE_JUST:
+                    //先设置客户端实例状态为启动失败。 一会启动成功后 会修改
                     this.serviceState = ServiceState.START_FAILED;
                     // If not specified,looking address from name server
                     if (null == this.clientConfig.getNamesrvAddr()) {
                         this.mQClientAPIImpl.fetchNameServerAddr();
                     }
                     // Start request-response channel
+                    //很重要！！！
                     this.mQClientAPIImpl.start();
                     // Start various schedule tasks
                     this.startScheduledTask();

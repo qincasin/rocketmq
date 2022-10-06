@@ -94,24 +94,43 @@ import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.apache.rocketmq.remoting.exception.RemotingTimeoutException;
 import org.apache.rocketmq.remoting.exception.RemotingTooMuchRequestException;
 
+/**
+ *
+ */
 public class DefaultMQProducerImpl implements MQProducerInner {
     private final InternalLogger log = ClientLogger.getLog();
+    //打印日志使用
     private final Random random = new Random();
+    //生产者门面对象，在这里主要当做config
     private final DefaultMQProducer defaultMQProducer;
+    //主题：发布信息 映射表
+    //key:主题
+    //value:主题发布信息
     private final ConcurrentMap<String/* topic */, TopicPublishInfo> topicPublishInfoTable =
-        new ConcurrentHashMap<String, TopicPublishInfo>();
+            new ConcurrentHashMap<String, TopicPublishInfo>();
+    //发送消息的钩子，留给用户扩展框架使用的
     private final ArrayList<SendMessageHook> sendMessageHookList = new ArrayList<SendMessageHook>();
+    //钩子
     private final RPCHook rpcHook;
+    //异步发送消息的时候使用的队列
     private final BlockingQueue<Runnable> asyncSenderThreadPoolQueue;
+    //默认的异步发送消息的线程池
     private final ExecutorService defaultAsyncSenderExecutor;
+    //定时任务，扫描过期request请求  执行 RequestFutureTable.scanExpiredRequest();
     private final Timer timer = new Timer("RequestHouseKeepingService", true);
     protected BlockingQueue<Runnable> checkRequestQueue;
     protected ExecutorService checkExecutor;
+    //服务状态
     private ServiceState serviceState = ServiceState.CREATE_JUST;
+    //客户端实例对象，生产者启动后需要注册到该客户端对象内 (观察者模式)
     private MQClientInstance mQClientFactory;
+    //注意和 SendMessageHook 区别，这里的是可以抛异常的hook，控制消息是否发送
     private ArrayList<CheckForbiddenHook> checkForbiddenHookList = new ArrayList<CheckForbiddenHook>();
+    //压缩级别，默认是5。
     private int zipCompressLevel = Integer.parseInt(System.getProperty(MixAll.MESSAGE_COMPRESS_LEVEL, "5"));
+    //选择队列容错策略
     private MQFaultStrategy mqFaultStrategy = new MQFaultStrategy();
+    //指定异步发送消息的线程池，如果指定的话，就不在使用默认的。
     private ExecutorService asyncSenderExecutor;
 
     public DefaultMQProducerImpl(final DefaultMQProducer defaultMQProducer) {
@@ -122,21 +141,30 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         this.defaultMQProducer = defaultMQProducer;
         this.rpcHook = rpcHook;
 
+        //创建异步消息线程池任务队列，长度:5w
         this.asyncSenderThreadPoolQueue = new LinkedBlockingQueue<Runnable>(50000);
+        //创建默认异步发送消息的线程池
         this.defaultAsyncSenderExecutor = new ThreadPoolExecutor(
-            Runtime.getRuntime().availableProcessors(),
-            Runtime.getRuntime().availableProcessors(),
-            1000 * 60,
-            TimeUnit.MILLISECONDS,
-            this.asyncSenderThreadPoolQueue,
-            new ThreadFactory() {
-                private AtomicInteger threadIndex = new AtomicInteger(0);
+                //核心线程数
+                Runtime.getRuntime().availableProcessors(),
+                //最大线程数
+                Runtime.getRuntime().availableProcessors(),
+                //空闲等待时间
+                1000 * 60,
+                //时间单位
+                TimeUnit.MILLISECONDS,
+                //阻塞队列
+                this.asyncSenderThreadPoolQueue,
+                //线程工厂
+                new ThreadFactory() {
+                    private AtomicInteger threadIndex = new AtomicInteger(0);
 
-                @Override
-                public Thread newThread(Runnable r) {
-                    return new Thread(r, "AsyncSenderExecutor_" + this.threadIndex.incrementAndGet());
-                }
-            });
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        //自定义线程名
+                        return new Thread(r, "AsyncSenderExecutor_" + this.threadIndex.incrementAndGet());
+                    }
+                });
     }
 
     public void registerCheckForbiddenHook(CheckForbiddenHook checkForbiddenHook) {
@@ -175,19 +203,29 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         this.start(true);
     }
 
+    /**
+     * 正常路径 startFactory ===>true
+     * @param startFactory
+     * @throws MQClientException
+     */
     public void start(final boolean startFactory) throws MQClientException {
         switch (this.serviceState) {
             case CREATE_JUST:
+                //修改状态为启动失败
                 this.serviceState = ServiceState.START_FAILED;
 
+                //check 一些参数 ；组名不能为空，也不能是 "DEFAULT_PRODUCER"
                 this.checkConfig();
 
+                //条件成立：说明当前生产者 不是 内部生产者 (什么是内部生产者？处理消息回退这种情况使用的生产者)
                 if (!this.defaultMQProducer.getProducerGroup().equals(MixAll.CLIENT_INNER_PRODUCER_GROUP)) {
+                    //修改生产者名称为：当前进程的PID
                     this.defaultMQProducer.changeInstanceNameToPID();
                 }
-
+                //获取当前进程的RocketMQ 客户端实例对象
                 this.mQClientFactory = MQClientManager.getInstance().getOrCreateMQClientInstance(this.defaultMQProducer, rpcHook);
 
+                //将生产者自己注册到 RocketMQ 客户端实例内 (观察者模式)
                 boolean registerOK = mQClientFactory.registerProducer(this.defaultMQProducer.getProducerGroup(), this);
                 if (!registerOK) {
                     this.serviceState = ServiceState.CREATE_JUST;
@@ -196,14 +234,18 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                         null);
                 }
 
+                //添加一个topic 发布信息
+                //key：TBW102 value：空对象
                 this.topicPublishInfoTable.put(this.defaultMQProducer.getCreateTopicKey(), new TopicPublishInfo());
 
                 if (startFactory) {
+                    //启动RocketMQ客户端 实例对象，入口：很重要
                     mQClientFactory.start();
                 }
 
                 log.info("the producer [{}] start OK. sendMessageWithVIPChannel={}", this.defaultMQProducer.getProducerGroup(),
                     this.defaultMQProducer.isSendMessageWithVIPChannel());
+                //设置实例状态为：运行中
                 this.serviceState = ServiceState.RUNNING;
                 break;
             case RUNNING:
@@ -217,8 +259,18 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                 break;
         }
 
+        //强制RocketMQ 客户端实例 向已知的 broker 节点发送一次心跳   （心跳的数据 后面我们看 客户端定时任务的时候在细聊）
         this.mQClientFactory.sendHeartbeatToAllBrokerWithLock();
 
+        //request 发送的消息，需要 消费者 回执 一条消息 。
+        //怎么实现的呢？
+        //生产者 msg 加了一些信息 关联ID 客户端ID，发送到broker 之后
+        //消费者从 broker 拿到这条消息，检查msg 类型 ，发现是一个 需要回执的消息
+        //处理完消息之后，根据msg 关联ID 和 客户端ID 声场一条消息 (封装响应给 生产者的结果) 发送给broker
+        //Broker 拿到这条消息之后，它知道 这是一条回执消息，根据客户端ID 找到channel，将消息推送给生产者
+        //生产者这边拿到 回执消息之后读取出来 关联ID 找到对应的 RequestFuture ，调用其release方法，将阻塞的线程唤醒。
+        //类似于生产者和消费者之间 进行了 一次 PRC，只不过中间 由 broker 代理完成的
+        //定时任务处理回执太慢的情况
         this.timer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {

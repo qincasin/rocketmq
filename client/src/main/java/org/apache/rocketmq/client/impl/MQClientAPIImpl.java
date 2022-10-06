@@ -244,6 +244,7 @@ public class MQClientAPIImpl {
     }
 
     public void start() {
+        //客户端调用网络层启动
         this.remotingClient.start();
     }
 
