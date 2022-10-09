@@ -325,6 +325,9 @@ public abstract class RebalanceImpl {
         }
     }
 
+    //这里判断了 什么时候队列被丢弃。。。也就是说 :
+    // 如果重平衡后，发现某个队列被新的消费者分配了，怎么办，总不能继续从该队列中拉取消息吧？
+    //RocketMQ 重平衡后会检查 pullRequest 是否还在新分配的列表中，如果不在，则丢弃，调用 isDrop() 可查出该pullRequest是否已丢弃
     private boolean updateProcessQueueTableInRebalance(final String topic, final Set<MessageQueue> mqSet,
         final boolean isOrder) {
         boolean changed = false;
@@ -336,6 +339,7 @@ public abstract class RebalanceImpl {
             ProcessQueue pq = next.getValue();
 
             if (mq.getTopic().equals(topic)) {
+                // 判断当前缓存 MessageQueue 是否包含在最新的 mqSet 中，如果不存在则将队列丢弃
                 if (!mqSet.contains(mq)) {
                     pq.setDropped(true);
                     if (this.removeUnnecessaryMessageQueue(mq, pq)) {
@@ -344,10 +348,12 @@ public abstract class RebalanceImpl {
                         log.info("doRebalance, {}, remove unnecessary mq, {}", consumerGroup, mq);
                     }
                 } else if (pq.isPullExpired()) {
+                    //如果队列拉取过期则丢弃
                     switch (this.consumeType()) {
                         case CONSUME_ACTIVELY:
                             break;
                         case CONSUME_PASSIVELY:
+                            //拉取时间间隔太大过期了
                             pq.setDropped(true);
                             if (this.removeUnnecessaryMessageQueue(mq, pq)) {
                                 it.remove();

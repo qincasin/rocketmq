@@ -22,6 +22,7 @@ import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.logging.InternalLogger;
 
 public class RebalanceService extends ServiceThread {
+    //默认重平衡的时长，可以通过参数配置，默认是20s
     private static long waitInterval =
         Long.parseLong(System.getProperty(
             "rocketmq.client.rebalance.waitInterval", "20000"));
