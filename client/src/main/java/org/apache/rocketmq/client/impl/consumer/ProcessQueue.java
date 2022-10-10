@@ -285,6 +285,7 @@ public class ProcessQueue {
             this.lockTreeMap.writeLock().lockInterruptibly();
             try {
                 for (MessageExt msg : msgs) {
+                    //清空 consumingMsgOrderlyTreeMap 返回消费进度
                     this.consumingMsgOrderlyTreeMap.remove(msg.getQueueOffset());
                     this.msgTreeMap.put(msg.getQueueOffset(), msg);
                 }

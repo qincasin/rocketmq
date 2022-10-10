@@ -332,7 +332,11 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
 
                                 //将消息列表存入 processQueue
                                 boolean dispatchToConsume = processQueue.putMessage(pullResult.getMsgFoundList());
-                                //将消息提交到 consumeMessageService 中的线程池供消费者消费
+                                //将消息提交到 consumeMessageService 中的线程池供消费者消费  --》 这里会走不同的策略，顺序消费走顺序消费的策略 ； 并发的走并发的策略
+                                //参数1：上面拉取到的消息列表
+                                //参数2：ProcessQueue
+                                //参数3：MessageQueue 信息 ，里面包含了topic ，brokerName，queueId 信息
+                                //参数4：代表是否成功放入到 processQueue 中成功 ；一个状态
                                 DefaultMQPushConsumerImpl.this.consumeMessageService.submitConsumeRequest(
                                     pullResult.getMsgFoundList(),
                                     processQueue,
@@ -398,8 +402,10 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                 }
             }
 
+            //消费数据失败逻辑
             @Override
             public void onException(Throwable e) {
+                //这里校验下 消费失败的数据 对应的topic 应该是 以 %RETRY% 开头
                 if (!pullRequest.getMessageQueue().getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
                     log.warn("execute the pull request exception", e);
                 }
@@ -1168,6 +1174,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             }
 
             if (StringUtils.isNotEmpty(this.defaultMQPushConsumer.getNamespace())) {
+                //如果资源包含命名空间，则从资源中解压命名空间
                 msg.setTopic(NamespaceUtil.withoutNamespace(msg.getTopic(), this.defaultMQPushConsumer.getNamespace()));
             }
         }
