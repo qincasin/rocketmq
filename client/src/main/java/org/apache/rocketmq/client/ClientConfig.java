@@ -188,7 +188,10 @@ public class ClientConfig {
     }
 
     public String getNamesrvAddr() {
+        //条件一：namesrvAddr不为空
+        //条件二：namesrvAddr.trim()后 以 "http://" 开头
         if (StringUtils.isNotEmpty(namesrvAddr) && NameServerAddressUtils.NAMESRV_ENDPOINT_PATTERN.matcher(namesrvAddr.trim()).matches()) {
+            //重新截取 http:// 后面的的 当做 nameSrvAddr
             return namesrvAddr.substring(NameServerAddressUtils.ENDPOINT_PREFIX.length());
         }
         return namesrvAddr;

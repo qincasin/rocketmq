@@ -271,6 +271,7 @@ public class MQClientInstance {
                     //很重要！！！
                     this.mQClientAPIImpl.start();
                     // Start various schedule tasks
+                    //启动持久化消费进度任务
                     this.startScheduledTask();
                     // Start pull service
                     this.pullMessageService.start();
@@ -296,6 +297,10 @@ public class MQClientInstance {
                 @Override
                 public void run() {
                     try {
+                        // 定时拉取 nameServAddr
+                        // 启动后10秒执行一次，其后 没两分钟周期 建立一次心跳
+                        // 如果远程的 nameServerAddr 和本地内存发生改变了，则会将远程的值覆盖本地值 ；；；
+                        //  通过remotingClient.updateNameServerAddressList(list)方法执行
                         MQClientInstance.this.mQClientAPIImpl.fetchNameServerAddr();
                     } catch (Exception e) {
                         log.error("ScheduledTask fetchNameServerAddr exception", e);
@@ -304,6 +309,7 @@ public class MQClientInstance {
             }, 1000 * 10, 1000 * 60 * 2, TimeUnit.MILLISECONDS);
         }
 
+        //每隔30S尝试更新主题路由信息
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -316,6 +322,7 @@ public class MQClientInstance {
             }
         }, 10, this.clientConfig.getPollNameServerInterval(), TimeUnit.MILLISECONDS);
 
+        //每隔30S 进行Broker心跳检测
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -329,6 +336,7 @@ public class MQClientInstance {
             }
         }, 1000, this.clientConfig.getHeartbeatBrokerInterval(), TimeUnit.MILLISECONDS);
 
+        //默认每隔5秒持久化ConsumeOffset
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -341,6 +349,7 @@ public class MQClientInstance {
             }
         }, 1000 * 10, this.clientConfig.getPersistConsumerOffsetInterval(), TimeUnit.MILLISECONDS);
 
+        //默认每隔1分钟检查线程池适配
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -360,6 +369,8 @@ public class MQClientInstance {
 
     public void updateTopicRouteInfoFromNameServer() {
         Set<String> topicList = new HashSet<String>();
+        // 客户端会定时从注册中心同步topic的相关信息，
+        // 当生产者/消费者启动后会往客户端实例的ConcurrentMap<String/* group */, MQProducerInner> producerTable和ConcurrentMap<String/* group */, MQConsumerInner> consumerTable注册对应的实例信息
 
         // Consumer
         {
@@ -516,6 +527,7 @@ public class MQClientInstance {
         }
     }
 
+    //循环该实例上面的每个消费者，分别调用各个消费者的持久化接口
     private void persistAllConsumerOffset() {
         Iterator<Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
         while (it.hasNext()) {
@@ -1006,6 +1018,7 @@ public class MQClientInstance {
     }
 
     public void doRebalance() {
+        //遍历每个消费组的消费者实例，分别执行重平衡
         for (Map.Entry<String, MQConsumerInner> entry : this.consumerTable.entrySet()) {
             MQConsumerInner impl = entry.getValue();
             if (impl != null) {

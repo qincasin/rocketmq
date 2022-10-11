@@ -121,17 +121,23 @@ public class ConsumerOffsetManager extends ConfigManager {
     public void commitOffset(final String clientHost, final String group, final String topic, final int queueId,
         final long offset) {
         // topic@group
+        //使用 topic@group 作为key
         String key = topic + TOPIC_GROUP_SEPARATOR + group;
         this.commitOffset(clientHost, key, queueId, offset);
     }
 
     private void commitOffset(final String clientHost, final String key, final int queueId, final long offset) {
+        //使用key 从消费进度缓存表去除对应的消费队列和消费进度map
         ConcurrentMap<Integer, Long> map = this.offsetTable.get(key);
         if (null == map) {
+            //条件成立 说明 第一次上报
+            //这里创建一个
             map = new ConcurrentHashMap<Integer, Long>(32);
             map.put(queueId, offset);
             this.offsetTable.put(key, map);
         } else {
+            //非第一次上报
+            //直接put 覆盖   ---> 覆盖对应的 queueId 对应的 offset 值
             Long storeOffset = map.put(queueId, offset);
             if (storeOffset != null && offset < storeOffset) {
                 log.warn("[NOTIFYME]update consumer offset less than store. clientHost={}, key={}, queueId={}, requestOffset={}, storeOffset={}", clientHost, key, queueId, offset, storeOffset);

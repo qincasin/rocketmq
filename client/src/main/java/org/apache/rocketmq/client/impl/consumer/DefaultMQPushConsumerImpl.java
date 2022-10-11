@@ -1025,6 +1025,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
     @Override
     public void doRebalance() {
         if (!this.pause) {
+            //执行真正重平衡的逻辑
             this.rebalanceImpl.doRebalance(this.isConsumeOrderly());
         }
     }
@@ -1034,9 +1035,11 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         try {
             this.makeSureStateOK();
             Set<MessageQueue> mqs = new HashSet<MessageQueue>();
+            //获取该消费者分配的消息队列
             Set<MessageQueue> allocateMq = this.rebalanceImpl.getProcessQueueTable().keySet();
             mqs.addAll(allocateMq);
 
+            //持久化全部队列消费进度
             this.offsetStore.persistAll(mqs);
         } catch (Exception e) {
             log.error("group: " + this.defaultMQPushConsumer.getConsumerGroup() + " persistConsumerOffset exception", e);
