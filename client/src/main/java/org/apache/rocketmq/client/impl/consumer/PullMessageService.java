@@ -95,7 +95,11 @@ public class PullMessageService extends ServiceThread {
 
         while (!this.isStopped()) {
             try {
-                //从pullRequestQueue 阻塞队列获取拉取消息任务
+                //从 pullRequestQueue(LinkedBlockingQueue) 阻塞队列获取拉取消息任务
+                //这里如果pullRequest为空，则当前的线程将阻塞住，直到有消息放入
+                //那么什么时候放入呢？有两个地方：
+                //1. this.executePullRequestLater(final PullRequest pullRequest, final long timeDelay) ;  延迟放入  一般是异常情况下
+                //2. this.executePullRequestImmediately(final PullRequest pullRequest) ;   立即放入
                 PullRequest pullRequest = this.pullRequestQueue.take();
                 this.pullMessage(pullRequest);
             } catch (InterruptedException ignored) {

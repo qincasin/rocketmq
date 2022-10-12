@@ -41,9 +41,10 @@ import org.apache.rocketmq.remoting.exception.RemotingException;
  */
 public class RemoteBrokerOffsetStore implements OffsetStore {
     private final static InternalLogger log = ClientLogger.getLog();
+    //MQ客户端实例，该实例被同一个客户端的消费者、生产者共用
     private final MQClientInstance mQClientFactory;
     private final String groupName;
-    //本地的消费进度缓存 offsetTable
+    //本地的消费进度缓存 offsetTable  (内存中)
     private ConcurrentMap<MessageQueue, AtomicLong> offsetTable =
         new ConcurrentHashMap<MessageQueue, AtomicLong>();
 

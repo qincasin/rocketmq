@@ -140,6 +140,20 @@ public class PullAPIWrapper {
         }
     }
 
+    /**
+     * @param mq                消息消费队列
+     * @param subExpression     消息订阅子模式subscribe( topicName, "模式")
+     * @param expressionType
+     * @param subVersion        版本
+     * @param offset            抓取位置
+     * @param maxNums           从broker端抓取多少消息
+     * @param sysFlag           系统标记，FLAG_COMMIT_OFFSET FLAG_SUSPEND FLAG_SUBSCRIPTION FLAG_CLASS_FILTER
+     * @param commitOffset      当前消息队列 commitlog日志中当前的最新偏移量（内存中）
+     * @param brokerSuspendMaxTimeMillis    允许的broker 暂停的时间，毫秒为单位，默认为15s
+     * @param timeoutMillis         超时时间 默认30s
+     * @param communicationMode 通讯方式 默认 异步
+     * @param pullCallback      pull 回调
+     */
     public PullResult pullKernelImpl(
         final MessageQueue mq,
         final String subExpression,
