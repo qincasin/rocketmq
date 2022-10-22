@@ -369,17 +369,18 @@ public abstract class RebalanceImpl {
             }
         }
 
+        //增加 不在processQueueTable && 存在于mqSet 里的消息队列。
         List<PullRequest> pullRequestList = new ArrayList<PullRequest>();
         for (MessageQueue mq : mqSet) {
             if (!this.processQueueTable.containsKey(mq)) {
-                if (isOrder && !this.lock(mq)) {
+                if (isOrder && !this.lock(mq)) {  // 顺序消息锁定消息队列,锁定失败则等待下次负载均衡再试
                     log.warn("doRebalance, {}, add a new mq failed, {}, because lock failed", consumerGroup, mq);
                     continue;
                 }
 
                 this.removeDirtyOffset(mq);
                 ProcessQueue pq = new ProcessQueue();
-                long nextOffset = this.computePullFromWhere(mq);
+                long nextOffset = this.computePullFromWhere(mq); //从Broker读取MessageQueue的消费OffSet
                 if (nextOffset >= 0) {
                     ProcessQueue pre = this.processQueueTable.putIfAbsent(mq, pq);
                     if (pre != null) {
@@ -388,7 +389,7 @@ public abstract class RebalanceImpl {
                         log.info("doRebalance, {}, add a new mq, {}", consumerGroup, mq);
                         PullRequest pullRequest = new PullRequest();
                         pullRequest.setConsumerGroup(consumerGroup);
-                        pullRequest.setNextOffset(nextOffset);
+                        pullRequest.setNextOffset(nextOffset); //设置下次拉取时的起始位置
                         pullRequest.setMessageQueue(mq);
                         pullRequest.setProcessQueue(pq);
                         pullRequestList.add(pullRequest);

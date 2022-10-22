@@ -247,7 +247,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);
 
         if (cachedMessageCount > this.defaultMQPushConsumer.getPullThresholdForQueue()) {
-            //流控，大于1000个消费时，延迟50秒消费
+            //流控，大于1000个消费时，延迟50毫秒消费
             this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);
             //每触发1000次打印一次警告
             if ((queueFlowControlTimes++ % 1000) == 0) {

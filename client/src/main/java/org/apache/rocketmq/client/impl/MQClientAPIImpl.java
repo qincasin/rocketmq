@@ -244,7 +244,7 @@ public class MQClientAPIImpl {
     }
 
     public void start() {
-        //客户端调用网络层启动
+        //客户端调用网络层启动 里面封装了 netty 的操作的一些列成，包括 同步调用、异步调用
         this.remotingClient.start();
     }
 
