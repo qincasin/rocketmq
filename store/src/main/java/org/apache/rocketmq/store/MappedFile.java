@@ -42,32 +42,50 @@ import org.apache.rocketmq.store.util.LibC;
 import sun.nio.ch.DirectBuffer;
 
 public class MappedFile extends ReferenceResource {
+    //内存页大小 4K
     public static final int OS_PAGE_SIZE = 1024 * 4;
     protected static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
+    //当前进程下，所有的 mappedFile 占用的 虚拟内存大小
     private static final AtomicLong TOTAL_MAPPED_VIRTUAL_MEMORY = new AtomicLong(0);
 
+    //当前进程下，所有的 mappedFile 个数
     private static final AtomicInteger TOTAL_MAPPED_FILES = new AtomicInteger(0);
+    //当前 mappedFile 数据写入点
     protected final AtomicInteger wrotePosition = new AtomicInteger(0);
     protected final AtomicInteger committedPosition = new AtomicInteger(0);
+    //当前 mappedFile 数据 落盘位 点 （flushedPosition 之前的数据都是 安全数据，flushedPosition ~ wrotePosition 之间的数据属于 脏页(内存中的数据并没有落盘，不安全)数据 ）
     private final AtomicInteger flushedPosition = new AtomicInteger(0);
+    //文件大小
     protected int fileSize;
+    //文件通道
     protected FileChannel fileChannel;
     /**
      * Message will put to here first, and then reput to FileChannel if writeBuffer is not null.
      */
     protected ByteBuffer writeBuffer = null;
     protected TransientStorePool transientStorePool = null;
+    //文件名称 （CommitLog、ConsumeQueue：文件名都是 第一条消息的 物理偏移量，索引文件：年月日时分秒......）
     private String fileName;
+    //文件名转Long
     private long fileFromOffset;
+    //文件对象
     private File file;
+    //内存映射缓冲区，访问虚拟内存
     private MappedByteBuffer mappedByteBuffer;
+    //该文件下，保存的第一条 msg 的存储时间
     private volatile long storeTimestamp = 0;
+    //当前文件如果是 目录内 有效文件的 首文件的话， 则该值 为 true；
     private boolean firstCreateInQueue = false;
 
     public MappedFile() {
     }
 
+    /**
+     * @param fileName 文件名，（绝对路径文件名）
+     * @param fileSize 文件大小
+     * @throws IOException
+     */
     public MappedFile(final String fileName, final int fileSize) throws IOException {
         init(fileName, fileSize);
     }
@@ -148,17 +166,26 @@ public class MappedFile extends ReferenceResource {
         this.transientStorePool = transientStorePool;
     }
 
+    /**
+     * @param fileName 文件名，（绝对路径文件名）
+     * @param fileSize 文件大小
+     */
     private void init(final String fileName, final int fileSize) throws IOException {
         this.fileName = fileName;
         this.fileSize = fileSize;
+        //创建文件对象
         this.file = new File(fileName);
+        //文件名称 转long
         this.fileFromOffset = Long.parseLong(this.file.getName());
         boolean ok = false;
 
+        //确定父文件目录存在，不存在创建
         ensureDirOK(this.file.getParent());
 
         try {
+            //创建文件通道 -- JDK NIO
             this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
+            //获取文件内存映射缓冲区
             this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
             TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
             TOTAL_MAPPED_FILES.incrementAndGet();
@@ -188,6 +215,10 @@ public class MappedFile extends ReferenceResource {
         return fileChannel;
     }
 
+    /**
+     * @param msg 消息
+     * @param cb 追加消息回调（消息具体哪些个字段需要追加到文件中，都由它控制）
+     */
     public AppendMessageResult appendMessage(final MessageExtBrokerInner msg, final AppendMessageCallback cb) {
         return appendMessagesInner(msg, cb);
     }
@@ -196,24 +227,35 @@ public class MappedFile extends ReferenceResource {
         return appendMessagesInner(messageExtBatch, cb);
     }
 
+    /**
+     * @param messageExt 消息
+     * @param cb 追加消息回调（消息具体哪些个字段需要追加到文件中，都由它控制）
+     */
     public AppendMessageResult appendMessagesInner(final MessageExt messageExt, final AppendMessageCallback cb) {
         assert messageExt != null;
         assert cb != null;
 
+        //当前内存映射文件的写入位点
         int currentPos = this.wrotePosition.get();
 
+        //条件成立：说明文件还可以继续写
         if (currentPos < this.fileSize) {
+            //使用内存映射buffer 创建切片
             ByteBuffer byteBuffer = writeBuffer != null ? writeBuffer.slice() : this.mappedByteBuffer.slice();
+            //将切片的byteBuffer的pos 设置为 数据写入位点
             byteBuffer.position(currentPos);
             AppendMessageResult result;
             if (messageExt instanceof MessageExtBrokerInner) {
+                //向内存映射中 追加 数据
                 result = cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, (MessageExtBrokerInner) messageExt);
             } else if (messageExt instanceof MessageExtBatch) {
                 result = cb.doAppend(this.getFileFromOffset(), byteBuffer, this.fileSize - currentPos, (MessageExtBatch) messageExt);
             } else {
                 return new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR);
             }
+            //更新数据 写入位点，加上 刚刚写入的数据量
             this.wrotePosition.addAndGet(result.getWroteBytes());
+            //保存最后一条msg的存储时间
             this.storeTimestamp = result.getStoreTimestamp();
             return result;
         }
@@ -225,9 +267,14 @@ public class MappedFile extends ReferenceResource {
         return this.fileFromOffset;
     }
 
+    /**
+     * @param data  需要写入到 文件的 字节数组
+     * @return boolean true,写入成功；false，写入失败
+     */
     public boolean appendMessage(final byte[] data) {
         int currentPos = this.wrotePosition.get();
 
+        //条件成立：说明当前 文件 剩余空间 可以容得下 data 字节数据
         if ((currentPos + data.length) <= this.fileSize) {
             try {
                 this.fileChannel.position(currentPos);
@@ -244,6 +291,7 @@ public class MappedFile extends ReferenceResource {
 
     /**
      * Content of data from offset to offset + length will be wrote to file.
+     * 从偏移量到偏移量+长度的数据内容将被写入文件
      *
      * @param offset The offset of the subarray to be used.
      * @param length The length of the subarray to be used.
@@ -266,11 +314,14 @@ public class MappedFile extends ReferenceResource {
     }
 
     /**
-     * @return The current flushed position
+     * @param flushLeastPages 刷盘的最小页数 （等于0时，属于强制刷盘; >0时，需要脏页数据达到 flushLeastPages 才进行刷盘）
+     * @return The current flushed position   当前的刷盘点
      */
     public int flush(final int flushLeastPages) {
         if (this.isAbleToFlush(flushLeastPages)) {
-            if (this.hold()) {
+            //执行到这里是说明可以刷盘了。上面返回了true
+            if (this.hold()) { //引用计数+1；保证刷盘过程中不会释放资源
+                //获取数据写入位点
                 int value = getReadPosition();
 
                 try {
@@ -278,19 +329,23 @@ public class MappedFile extends ReferenceResource {
                     if (writeBuffer != null || this.fileChannel.position() != 0) {
                         this.fileChannel.force(false);
                     } else {
+                        //落盘
                         this.mappedByteBuffer.force();
                     }
                 } catch (Throwable e) {
                     log.error("Error occurred when force data to disk.", e);
                 }
 
+                //将写入位点，赋值给刷盘 位点
                 this.flushedPosition.set(value);
+                //引用计数-1
                 this.release();
             } else {
                 log.warn("in flush, hold failed, flush offset = " + this.flushedPosition.get());
                 this.flushedPosition.set(getReadPosition());
             }
         }
+        //返回最新的刷盘点
         return this.getFlushedPosition();
     }
 
@@ -335,18 +390,26 @@ public class MappedFile extends ReferenceResource {
         }
     }
 
+    /**
+     * @param flushLeastPages 刷盘的最小页数 （等于0时，属于强制刷盘; >0时，需要脏页数据达到 flushLeastPages 才进行刷盘）
+     */
     private boolean isAbleToFlush(final int flushLeastPages) {
+        //获取当前刷盘位点
         int flush = this.flushedPosition.get();
+        //获取当前写入位点
         int write = getReadPosition();
 
+        //文件写满的情况，返回true，一定执行刷盘操作
         if (this.isFull()) {
             return true;
         }
 
         if (flushLeastPages > 0) {
+            //计算的结果就是 脏页 ； 脏页数据 >= flushLeastPages 才返回true ；
             return ((write / OS_PAGE_SIZE) - (flush / OS_PAGE_SIZE)) >= flushLeastPages;
         }
-
+        //执行到这里，说明 flushLeastPages ==0  或者 flushLeastPages <0
+        //如下的条件说明：只要有脏数据就刷盘
         return write > flush;
     }
 
@@ -398,10 +461,17 @@ public class MappedFile extends ReferenceResource {
         return null;
     }
 
+    /**
+     * 该方法，以 pos 为开始起点，到 有效数据为止，创建出一个切片 byteBuffer，供业务访问数据
+     * @param pos 数据起始位点
+     * @return
+     */
     public SelectMappedBufferResult selectMappedBuffer(int pos) {
+        //获取有效数据位点
         int readPosition = getReadPosition();
+        //条件成立：说明 pos 处于有效数据区间
         if (pos < readPosition && pos >= 0) {
-            if (this.hold()) {
+            if (this.hold()) {  //资源引用计数 +1
                 ByteBuffer byteBuffer = this.mappedByteBuffer.slice();
                 byteBuffer.position(pos);
                 int size = readPosition - pos;
@@ -428,6 +498,7 @@ public class MappedFile extends ReferenceResource {
             return true;
         }
 
+        //释放对外内存
         clean(this.mappedByteBuffer);
         TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(this.fileSize * (-1));
         TOTAL_MAPPED_FILES.decrementAndGet();
@@ -435,6 +506,10 @@ public class MappedFile extends ReferenceResource {
         return true;
     }
 
+    /**
+     * 删除文件时 使用的方法
+     * @param intervalForcibly
+     */
     public boolean destroy(final long intervalForcibly) {
         this.shutdown(intervalForcibly);
 
@@ -481,6 +556,11 @@ public class MappedFile extends ReferenceResource {
         this.committedPosition.set(pos);
     }
 
+    /**
+     * 内存映射文件  内存预热
+     * @param type
+     * @param pages
+     */
     public void warmMappedFile(FlushDiskType type, int pages) {
         long beginTime = System.currentTimeMillis();
         ByteBuffer byteBuffer = this.mappedByteBuffer.slice();
