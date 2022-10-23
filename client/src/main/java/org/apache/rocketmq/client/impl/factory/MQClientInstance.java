@@ -563,10 +563,17 @@ public class MQClientInstance {
     }
 
     public boolean updateTopicRouteInfoFromNameServer(final String topic) {
-        //定时任务路径分析
-        // 参数1：topic
-        // 参数2：isDefault
-        // 参数3：null
+        /**
+         * 1. 定时任务路径分析
+         * 参数1：topic
+         * 参数2：isDefault
+         * 参数3：null
+         * <p>
+         * 2. 发送消息路径
+         * 参数1：topic
+         * 参数2：isDefault
+         * 参数3：null
+         */
         return updateTopicRouteInfoFromNameServer(topic, false, null);
     }
 
@@ -663,10 +670,24 @@ public class MQClientInstance {
         }
     }
 
-    //定时任务路径分析
-    // 参数1：topic
-    // 参数2：isDefault
-    // 参数3：null
+    /**
+     * 1. 定时任务路径分析
+     * 参数1：topic
+     * 参数2：isDefault  --> false
+     * 参数3：null
+     * <p>
+     * 2. 发送消息路径
+     * 2.1 正常情况
+     * 参数1：topic
+     * 参数2：isDefault  --> false
+     * 参数3：null
+     * <p>
+     * 2.2 特殊情况：因为nameserver 上并没有 topic 的路由数据，所以 拿到的 topicPublishInfo 还是一个空的对象
+     * 参数1：topic
+     * 参数2：isDefault  --> true !!!
+     * 参数3：当前的生产者对象
+     *
+     */
     public boolean updateTopicRouteInfoFromNameServer(final String topic, boolean isDefault,
         DefaultMQProducer defaultMQProducer) {
         try {
@@ -674,6 +695,7 @@ public class MQClientInstance {
                 try {
                     TopicRouteData topicRouteData;
                     if (isDefault && defaultMQProducer != null) {
+                        //获取 TBW102 topic的 路由数据
                         topicRouteData = this.mQClientAPIImpl.getDefaultTopicRouteInfoFromNameServer(defaultMQProducer.getCreateTopicKey(),
                             1000 * 3);
                         if (topicRouteData != null) {

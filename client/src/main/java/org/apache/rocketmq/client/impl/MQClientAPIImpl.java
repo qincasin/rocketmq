@@ -427,6 +427,15 @@ public class MQClientAPIImpl {
 
     }
 
+    //获取API对象，调用他的 发送方法，完成发送
+    //参数1：broker地址
+    //参数2：brokerName
+    //参数3：消息
+    //参数4：SendMessageRequestHeader
+    //参数5：剩余超时限制
+    //参数6：发送模式
+    //参数7：context
+    //参数8：生产者对象
     public SendResult sendMessage(
         final String addr,
         final String brokerName,
@@ -437,9 +446,33 @@ public class MQClientAPIImpl {
         final SendMessageContext context,
         final DefaultMQProducerImpl producer
     ) throws RemotingException, MQBrokerException, InterruptedException {
+        //参数1：broker地址
+        //参数2：brokerName
+        //参数3：消息
+        //参数4：SendMessageRequestHeader
+        //参数5：剩余超时限制
+        //参数6：发送模式
+        //参数7：回调；同步模式下传的null
+        //参数8：主题发布细腻
+        //参数9：客户端实例 instance （null）
+        //参数10：重试次数(0)
+        //参数11：context
+        //参数12：生产者对象
         return sendMessage(addr, brokerName, msg, requestHeader, timeoutMillis, communicationMode, null, null, null, 0, context, producer);
     }
 
+    //参数1：broker地址
+    //参数2：brokerName
+    //参数3：消息
+    //参数4：SendMessageRequestHeader
+    //参数5：剩余超时限制
+    //参数6：发送模式
+    //参数7：回调；同步模式下传的null
+    //参数8：主题发布细腻
+    //参数9：客户端实例 instance （null）
+    //参数10：重试次数(0)
+    //参数11：context
+    //参数12：生产者对象
     public SendResult sendMessage(
         final String addr,
         final String brokerName,
@@ -467,12 +500,14 @@ public class MQClientAPIImpl {
             }
         } else {
             if (sendSmartMsg || msg instanceof MessageBatch) {
+                //转换成 a/b/c/d/e/f/g/h/i/j/k/l/m 方便传输，节约传输大小
                 SendMessageRequestHeaderV2 requestHeaderV2 = SendMessageRequestHeaderV2.createSendMessageRequestHeaderV2(requestHeader);
                 request = RemotingCommand.createRequestCommand(msg instanceof MessageBatch ? RequestCode.SEND_BATCH_MESSAGE : RequestCode.SEND_MESSAGE_V2, requestHeaderV2);
             } else {
                 request = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE, requestHeader);
             }
         }
+        //将消息体 放到网络传输层 的 body中
         request.setBody(msg.getBody());
 
         switch (communicationMode) {
@@ -489,10 +524,12 @@ public class MQClientAPIImpl {
                     retryTimesWhenSendFailed, times, context, producer);
                 return null;
             case SYNC:
+                //当前耗时，如果超时，应该抛出异常，不发送消息啦
                 long costTimeSync = System.currentTimeMillis() - beginStartTime;
                 if (timeoutMillis < costTimeSync) {
                     throw new RemotingTooMuchRequestException("sendMessage call timeout");
                 }
+                //进行同步调用，将消息传递到 broker，broker 完成存储后 或者 其他情况 都会返回 。
                 return this.sendMessageSync(addr, brokerName, msg, timeoutMillis - costTimeSync, request);
             default:
                 assert false;
@@ -509,8 +546,10 @@ public class MQClientAPIImpl {
         final long timeoutMillis,
         final RemotingCommand request
     ) throws RemotingException, MQBrokerException, InterruptedException {
+        //netty 层面 服务端 通信 调用
         RemotingCommand response = this.remotingClient.invokeSync(addr, request, timeoutMillis);
         assert response != null;
+        //处理结果 以及 包装 response Status
         return this.processSendResponse(brokerName, msg, response,addr);
     }
 

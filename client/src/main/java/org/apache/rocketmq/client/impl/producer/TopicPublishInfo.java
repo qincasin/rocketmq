@@ -68,10 +68,16 @@ public class TopicPublishInfo {
         this.haveTopicRouterInfo = haveTopicRouterInfo;
     }
 
+    /**
+     * 默认选择队列的方法
+     * 参数1：lastBrokerName： 第一次时 为null，其他情况都不不为null
+     * 返回值：当前主题的 一个 队列
+     */
     public MessageQueue selectOneMessageQueue(final String lastBrokerName) {
         if (lastBrokerName == null) {
             return selectOneMessageQueue();
         } else {
+            //brokerName不为空选择时， 则会选择一个和上次不重名的brokerName，如果仍然没有选择出来，则在调用默认的方法在选择一次
             for (int i = 0; i < this.messageQueueList.size(); i++) {
                 int index = this.sendWhichQueue.getAndIncrement();
                 int pos = Math.abs(index) % this.messageQueueList.size();
