@@ -19,6 +19,8 @@ package org.apache.rocketmq.store;
 
 import java.io.File;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import org.apache.rocketmq.common.UtilAll;
 import org.junit.After;
@@ -251,5 +253,16 @@ public class MappedFileQueueTest {
     public void destory() {
         File file = new File("target/unit_test_store");
         UtilAll.deleteFile(file);
+    }
+    @Test
+    public void testFile(){
+        File file = new File("target");
+        File[] files = file.listFiles();
+        assert files != null;
+//        Arrays.sort(files);
+        for (File f : files) {
+            long length = f.length();
+            System.out.println(f.getName());
+        }
     }
 }

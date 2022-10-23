@@ -35,19 +35,26 @@ public class MappedFileQueue {
 
     private static final int DELETE_FILES_BATCH_MAX = 10;
 
+    // mappedFileQueue 管理的目录（commitLog：../store/commitlog 或者 consumeQueue：../store/xxx_topic/0）
     private final String storePath;
 
+    //目录下每个文件大小(commitLog文件：1G，consumeQueue文件：600w字节)
     private final int mappedFileSize;
 
+    //list，目录下的每个mappedFile 都加入该list
     private final CopyOnWriteArrayList<MappedFile> mappedFiles = new CopyOnWriteArrayList<MappedFile>();
 
+    //创建mappedFile的服务，内部有自己的线程，通过向他提交request，内部线程池处理完毕后 会返回给我们结果  结果就是mappedFile对象
     private final AllocateMappedFileService allocateMappedFileService;
 
+    //目录的刷盘位点 (值：curMappedFile.fileName + curMappedFile.wrotePosition)
     private long flushedWhere = 0;
     private long committedWhere = 0;
 
+    //当前目录下最后一条msg存储时间
     private volatile long storeTimestamp = 0;
 
+    //构造方法就是简单的赋值
     public MappedFileQueue(final String storePath, int mappedFileSize,
         AllocateMappedFileService allocateMappedFileService) {
         this.storePath = storePath;
@@ -145,10 +152,13 @@ public class MappedFileQueue {
     }
 
     public boolean load() {
+        //创建目录对象
         File dir = new File(this.storePath);
+        //获取目录下的所有文件
         File[] files = dir.listFiles();
         if (files != null) {
             // ascending order
+            //文件名升序排序
             Arrays.sort(files);
             for (File file : files) {
 
@@ -159,11 +169,14 @@ public class MappedFileQueue {
                 }
 
                 try {
+                    //为当前file创建 对应的 mappedFile对象
                     MappedFile mappedFile = new MappedFile(file.getPath(), mappedFileSize);
 
+                    //设置wrotePosition 和 flushedPosition ，这里给的值都是 mappedFileSize，并不是准确值，准确值需要 recover 阶段设置
                     mappedFile.setWrotePosition(this.mappedFileSize);
                     mappedFile.setFlushedPosition(this.mappedFileSize);
                     mappedFile.setCommittedPosition(this.mappedFileSize);
+                    //将当前file的mappedFile对象 加入到 list 集合管理
                     this.mappedFiles.add(mappedFile);
                     log.info("load " + file.getPath() + " OK");
                 } catch (IOException e) {
