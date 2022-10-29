@@ -100,11 +100,13 @@ public interface MQPushConsumer extends MQConsumer {
 
     /**
      * Suspend the consumption
+     * 停止消费
      */
     void suspend();
 
     /**
      * Resume the consumption
+     * 恢复消费
      */
     void resume();
 }
