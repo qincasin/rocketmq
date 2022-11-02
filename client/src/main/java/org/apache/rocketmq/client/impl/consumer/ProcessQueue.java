@@ -44,14 +44,20 @@ public class ProcessQueue {
     public final static long REBALANCE_LOCK_INTERVAL = Long.parseLong(System.getProperty("rocketmq.client.rebalance.lockInterval", "20000"));
     private final static long PULL_MAX_IDLE_TIME = Long.parseLong(System.getProperty("rocketmq.client.pull.pullMaxIdleTime", "120000"));
     private final InternalLogger log = ClientLogger.getLog();
+    //读写锁
     private final ReadWriteLock lockTreeMap = new ReentrantReadWriteLock();
+    //消息容量，key 消息偏移量，val 消息
     private final TreeMap<Long, MessageExt> msgTreeMap = new TreeMap<Long, MessageExt>();
+    //消息数量
     private final AtomicLong msgCount = new AtomicLong();
+    //消息体总大小
     private final AtomicLong msgSize = new AtomicLong();
+    //重入锁，顺序消费使用
     private final Lock lockConsume = new ReentrantLock();
     /**
      * A subset of msgTreeMap, will only be used when orderly consume
      */
+    //顺序消费临时容器， key 消息偏移量，val 消息
     private final TreeMap<Long, MessageExt> consumingMsgOrderlyTreeMap = new TreeMap<Long, MessageExt>();
     private final AtomicLong tryUnlockTimes = new AtomicLong(0);
     private volatile long queueOffsetMax = 0L;

@@ -38,7 +38,9 @@ public class RebalanceService extends ServiceThread {
         log.info(this.getServiceName() + " service started");
 
         while (!this.isStopped()) {
+            //休眠一段时间 (20s) ，避免线程将cpu 占死.....
             this.waitForRunning(waitInterval);
+            //调用客户端实例的 负载均衡 方法，客户端实例会遍历注册在客户端实例上的 全部消费者，调用消费者的 负载均衡方法
             this.mqClientFactory.doRebalance();
         }
 

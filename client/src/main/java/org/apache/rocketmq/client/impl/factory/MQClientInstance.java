@@ -1069,6 +1069,7 @@ public class MQClientInstance {
             MQConsumerInner impl = entry.getValue();
             if (impl != null) {
                 try {
+                    //这里找到对应的 consumer 方法 ---- DefaultMQPushConsumerImpl
                     impl.doRebalance();
                 } catch (Throwable e) {
                     log.error("doRebalance exception", e);
