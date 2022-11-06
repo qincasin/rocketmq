@@ -21,9 +21,9 @@ import org.apache.rocketmq.common.message.MessageQueue;
 public class PullRequest {
     //消费组
     private String consumerGroup;
-    //messageQueue消息队列
+    //messageQueue消息队列  队列 元数据
     private MessageQueue messageQueue;
-    //ProcessQueue 承载拉取到的消息的对象
+    //ProcessQueue 承载拉取到的消息的对象 |||| 消费者本地的处理队列
     private ProcessQueue processQueue;
     //下次拉取消息的点位
     private long nextOffset;

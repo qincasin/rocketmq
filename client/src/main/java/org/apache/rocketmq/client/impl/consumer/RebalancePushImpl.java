@@ -52,6 +52,8 @@ public class RebalancePushImpl extends RebalanceImpl {
         /**
          * When rebalance result changed, should update subscription's version to notify broker.
          * Fix: inconsistency subscription may lead to consumer miss messages.
+         * 当重新平衡结果发生变化时，应更新订阅版本以通知代理。
+         * 修复：订阅不一致可能导致消费者错过消息。
          */
         SubscriptionData subscriptionData = this.subscriptionInner.get(topic);
         long newVersion = System.currentTimeMillis();
@@ -83,7 +85,9 @@ public class RebalancePushImpl extends RebalanceImpl {
 
     @Override
     public boolean removeUnnecessaryMessageQueue(MessageQueue mq, ProcessQueue pq) {
+        //持久化 指定 "mq" 的消费进度，到mq 归属的 broker 节点 （broker 端会根据group 维护 每个 queue的offset）
         this.defaultMQPushConsumerImpl.getOffsetStore().persist(mq);
+        //移除当前mq 的 offset （本地）
         this.defaultMQPushConsumerImpl.getOffsetStore().removeOffset(mq);
         if (this.defaultMQPushConsumerImpl.isConsumeOrderly()
             && MessageModel.CLUSTERING.equals(this.defaultMQPushConsumerImpl.messageModel())) {
