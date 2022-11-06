@@ -80,4 +80,15 @@ public class PullSysFlag {
     public static boolean hasLitePullFlag(final int sysFlag) {
         return (sysFlag & FLAG_LITE_PULL_MESSAGE) == FLAG_LITE_PULL_MESSAGE;
     }
+
+    public static void main(String[] args) {
+        int resp = buildSysFlag(true, false, false,true );
+        System.out.println(Integer.toBinaryString(resp) +"--"+resp);
+        System.out.println(hasCommitOffsetFlag(9));
+        toBinary(clearCommitOffsetFlag(9));
+
+    }
+    private static void toBinary(int i){
+        System.out.println(Integer.toBinaryString(i));
+    }
 }
