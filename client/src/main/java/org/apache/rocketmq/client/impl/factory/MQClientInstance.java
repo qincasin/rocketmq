@@ -1125,6 +1125,9 @@ public class MQClientInstance {
         return null;
     }
 
+    //参数1：brokerName
+    //参数2：this.recalculatePullFromWhichNode(mq) ; 可能是0 ，也可能是1
+    //参数3：继续当前broker？  false
     public FindBrokerResult findBrokerAddressInSubscribe(
         final String brokerName,
         final long brokerId,
@@ -1134,8 +1137,10 @@ public class MQClientInstance {
         boolean slave = false;
         boolean found = false;
 
+        //获取该broker 的地址分布 map
         HashMap<Long/* brokerId */, String/* address */> map = this.brokerAddrTable.get(brokerName);
         if (map != null && !map.isEmpty()) {
+            //获取指定 brokerId 的addr
             brokerAddr = map.get(brokerId);
             slave = brokerId != MixAll.MASTER_ID;
             found = brokerAddr != null;

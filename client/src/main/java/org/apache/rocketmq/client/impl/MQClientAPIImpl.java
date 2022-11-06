@@ -752,6 +752,12 @@ public class MQClientAPIImpl {
         return sendResult;
     }
 
+    //使用 mQClientAPIImpl 异步拉取
+    //参数1：brokerAddr 本次拉消息请求的服务器地址
+    //参数2：requestHeader 拉消息业务参数封装对象
+    //参数3：timeoutMillis 网络调用超时限制 30s
+    //参数4：communicationMode RPC调用模式，这里是异步模式
+    //参数5：pullCallback  拉消息结果处理对象
     public PullResult pullMessage(
         final String addr,
         final PullMessageRequestHeader requestHeader,
@@ -759,6 +765,7 @@ public class MQClientAPIImpl {
         final CommunicationMode communicationMode,
         final PullCallback pullCallback
     ) throws RemotingException, MQBrokerException, InterruptedException {
+        //创建网络层 传输对象，RemotingCommand ，该对象封装了 requestHeader
         RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.PULL_MESSAGE, requestHeader);
 
         switch (communicationMode) {
@@ -766,6 +773,7 @@ public class MQClientAPIImpl {
                 assert false;
                 return null;
             case ASYNC:
+                //
                 this.pullMessageAsync(addr, request, timeoutMillis, pullCallback);
                 return null;
             case SYNC:
@@ -784,16 +792,31 @@ public class MQClientAPIImpl {
         final long timeoutMillis,
         final PullCallback pullCallback
     ) throws RemotingException, InterruptedException {
+        //InvokeCallback
         this.remotingClient.invokeAsync(addr, request, timeoutMillis, new InvokeCallback() {
+
+            // invokeCallback 最重要
+            // invokeAsync 内部会为本次请求 创建 一个 ResponseFuture 对象，放入到 remotingClient的 responseFutureTable 中，
+            // key 是 request.opaque。
+            // 在ResponseFuture内部还有  { 1. opaque 2.invokeCallback  3. response} 这些信息
+            // 当服务器端 响应 客户端时，会根据response.opaque 值找到 当前 responseFuture 对象，将结果设置到 responseFuture.response 字段上。
+            // 再接下来，会检查该 responseFuture.invokeCallback 是否有值，如果有值，则说明需要回调处理。
+            // 再接下来，就将该invokeCallback封装成任务，提交到 remotingClient 的 公共线程内执行，执行invokeCallback  operationComplete 方法。
+            // 传递参数：responseFuture
             @Override
             public void operationComplete(ResponseFuture responseFuture) {
+                //获取服务器端响应数据 response
                 RemotingCommand response = responseFuture.getResponseCommand();
                 if (response != null) {
                     try {
                         //处理响应，将响应封装为PullRequest对象
                         PullResult pullResult = MQClientAPIImpl.this.processPullResponse(response, addr);
+
                         assert pullResult != null;
+
+                        //将pullRequest 交给 "拉消息结果处理回调对象" 调用它的onSuccess 方法
                         pullCallback.onSuccess(pullResult);
+
                     } catch (Exception e) {
                         pullCallback.onException(e);
                     }
@@ -844,9 +867,16 @@ public class MQClientAPIImpl {
         }
 
         PullMessageResponseHeader responseHeader =
-            (PullMessageResponseHeader) response.decodeCommandCustomHeader(PullMessageResponseHeader.class);
+            (PullMessageResponseHeader) response.decodeCommandCustomHeader(PullMessageResponseHeader.class); //解码
 
-        //根据服务端返回的结果code码获取结果，组装PullResultExt
+        //根据服务端返回的结果code码获取结果，组装PullResul
+         //参数1 pullStatus        状态
+         //参数2 nextBeginOffset
+         //参数3 minOffset
+         //参数4 maxOffset
+         //参数5 msgFoundList      这里是null
+         //参数6 suggestWhichBrokerId 服务器推荐下次该mq拉消息时 使用的 主机id
+         //参数7 messageBinary     body  消息列表二进制
         return new PullResultExt(pullStatus, responseHeader.getNextBeginOffset(), responseHeader.getMinOffset(),
             responseHeader.getMaxOffset(), null, responseHeader.getSuggestWhichBrokerId(), response.getBody());
     }

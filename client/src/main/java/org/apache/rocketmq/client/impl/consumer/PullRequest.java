@@ -23,9 +23,10 @@ public class PullRequest {
     private String consumerGroup;
     //messageQueue消息队列  队列 元数据
     private MessageQueue messageQueue;
-    //ProcessQueue 承载拉取到的消息的对象 |||| 消费者本地的处理队列
+    //ProcessQueue 承载拉取到的消息的对象 |||| 消费者本地的队列快照， 从服务器拉取下来的消息 要先放到该快照队列内
+    // 消费任务 被消费的消息需要从该队列移除走
     private ProcessQueue processQueue;
-    //下次拉取消息的点位
+    //本次拉消息请求，使用的offset，----- 服务器端需要根据该offset 进行定位 消息位置，然后才可以获取一批消息
     private long nextOffset;
     private boolean lockedFirst = false;
 

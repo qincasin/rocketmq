@@ -25,6 +25,15 @@ public class PullResultExt extends PullResult {
     private final long suggestWhichBrokerId;
     private byte[] messageBinary;
 
+    /**
+     * @param pullStatus        状态
+     * @param nextBeginOffset
+     * @param minOffset
+     * @param maxOffset
+     * @param msgFoundList      这里是null
+     * @param suggestWhichBrokerId 服务器推荐下次该mq拉消息时 使用的 主机id
+     * @param messageBinary     body  消息列表二进制
+     */
     public PullResultExt(PullStatus pullStatus, long nextBeginOffset, long minOffset, long maxOffset,
         List<MessageExt> msgFoundList, final long suggestWhichBrokerId, final byte[] messageBinary) {
         super(pullStatus, nextBeginOffset, minOffset, maxOffset, msgFoundList);
