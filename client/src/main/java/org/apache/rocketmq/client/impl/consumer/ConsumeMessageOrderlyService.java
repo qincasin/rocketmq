@@ -284,10 +284,12 @@ public class ConsumeMessageOrderlyService implements ConsumeMessageService {
                     commitOffset = consumeRequest.getProcessQueue().commit();
                     this.getConsumerStatsManager().incConsumeOKTPS(consumerGroup, consumeRequest.getMessageQueue().getTopic(), msgs.size());
                     break;
-                case SUSPEND_CURRENT_QUEUE_A_MOMENT:
+                case SUSPEND_CURRENT_QUEUE_A_MOMENT:  // 消费消息异常时
                     this.getConsumerStatsManager().incConsumeFailedTPS(consumerGroup, consumeRequest.getMessageQueue().getTopic(), msgs.size());
+                    //检查重试次数
                     if (checkReconsumeTimes(msgs)) {
                         consumeRequest.getProcessQueue().makeMessageToConsumeAgain(msgs);
+                        //延迟1s后重试 --- 继续消费 ，重试次数未达到上线，则延迟1s后重试
                         this.submitConsumeRequestLater(
                             consumeRequest.getProcessQueue(),
                             consumeRequest.getMessageQueue(),
@@ -357,6 +359,7 @@ public class ConsumeMessageOrderlyService implements ConsumeMessageService {
         boolean suspend = false;
         if (msgs != null && !msgs.isEmpty()) {
             for (MessageExt msg : msgs) {
+                //默认顺序消费的重试次数是 Integer.MAX_VALUE
                 if (msg.getReconsumeTimes() >= getMaxReconsumeTimes()) {
                     MessageAccessor.setReconsumeTime(msg, String.valueOf(msg.getReconsumeTimes()));
                     if (!sendMessageBack(msg)) {
@@ -364,6 +367,7 @@ public class ConsumeMessageOrderlyService implements ConsumeMessageService {
                         msg.setReconsumeTimes(msg.getReconsumeTimes() + 1);
                     }
                 } else {
+                    //没到重试次数上线
                     suspend = true;
                     msg.setReconsumeTimes(msg.getReconsumeTimes() + 1);
                 }

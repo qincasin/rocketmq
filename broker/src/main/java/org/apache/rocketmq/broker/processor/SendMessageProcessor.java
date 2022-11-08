@@ -179,14 +179,17 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
         int delayLevel = requestHeader.getDelayLevel();
 
+        //获取"最大的重试次数"，默认是16
         int maxReconsumeTimes = subscriptionGroupConfig.getRetryMaxTimes();
         if (request.getVersion() >= MQVersion.Version.V3_4_9.ordinal()) {
             maxReconsumeTimes = requestHeader.getMaxReconsumeTimes();
         }
 
+        //默认最多重试次数16
         if (msgExt.getReconsumeTimes() >= maxReconsumeTimes 
             || delayLevel < 0) {
-            //如果消息重试次数已经达到了最大重试次数 或者 延迟级别小于0  则再次改变主题为 DLQ + groupName
+            //如果消息重试次数已经达到了最大重试次数 或者 延迟级别小于0
+            //则再次改变主题为 DLQ + groupName  ---- 死信队列
             newTopic = MixAll.getDLQTopic(requestHeader.getGroup());
             queueIdInt = Math.abs(this.random.nextInt() % 99999999) % DLQ_NUMS_PER_GROUP;
 

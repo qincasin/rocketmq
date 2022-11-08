@@ -215,6 +215,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
             try {
                 this.consumeExecutor.submit(consumeRequest);
             } catch (RejectedExecutionException e) {
+                //线程池消费失败之后 5s 重试
                 this.submitConsumeRequestLater(consumeRequest);
             }
         } else {
@@ -260,6 +261,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
         final ConsumeConcurrentlyContext context,
         final ConsumeRequest consumeRequest
     ) {
+        //这里的 consumeRT 默认是Integer 的最大值
         int ackIndex = context.getAckIndex();
 
         if (consumeRequest.getMsgs().isEmpty())
@@ -277,6 +279,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
                 this.getConsumerStatsManager().incConsumeFailedTPS(consumerGroup, consumeRequest.getMessageQueue().getTopic(), failed);
                 break;
             case RECONSUME_LATER:
+                //消息消费失败，则 ackIndex = -1 ，该批消息全部重新消费
                 ackIndex = -1;
                 this.getConsumerStatsManager().incConsumeFailedTPS(consumerGroup, consumeRequest.getMessageQueue().getTopic(),
                     consumeRequest.getMsgs().size());
@@ -296,18 +299,19 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
                 List<MessageExt> msgBackFailed = new ArrayList<MessageExt>(consumeRequest.getMsgs().size());
                 for (int i = ackIndex + 1; i < consumeRequest.getMsgs().size(); i++) {
                     MessageExt msg = consumeRequest.getMsgs().get(i);
-                    //发送sendMessageBack
+                    //发送sendMessageBack, 将未ack 的消息重新发送回broker，消息的延迟级别从context中获取，默认是0，即不延迟
                     boolean result = this.sendMessageBack(msg, context);
                     if (!result) {
+                        //失败情况，重试
                         msg.setReconsumeTimes(msg.getReconsumeTimes() + 1);
                         msgBackFailed.add(msg);
                     }
                 }
 
                 if (!msgBackFailed.isEmpty()) {
+                    //走到这里说明 发送消息到broker失败了，延迟5s 重新消费消息
                     consumeRequest.getMsgs().removeAll(msgBackFailed);
 
-                     //更新消息消费进度，不管消费成功与否，上述这些消息消费成功，其实就是修改消费偏移量。（失败的，会进行重试，会创建新的消息)
                     this.submitConsumeRequestLater(msgBackFailed, consumeRequest.getProcessQueue(), consumeRequest.getMessageQueue());
                 }
                 break;
@@ -438,6 +442,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
                 } else {
                     returnType = ConsumeReturnType.RETURNNULL;
                 }
+                //消费超时，默认15分钟
             } else if (consumeRT >= defaultMQPushConsumer.getConsumeTimeout() * 60 * 1000) {
                 returnType = ConsumeReturnType.TIME_OUT;
             } else if (ConsumeConcurrentlyStatus.RECONSUME_LATER == status) {
