@@ -229,6 +229,7 @@ public abstract class NettyRemotingAbstract {
                                             log.error(response.toString());
                                         }
                                     } else {
+                                        //啥也不干，可以达到长轮训的目的
                                     }
                                 }
                             }
