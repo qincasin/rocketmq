@@ -552,6 +552,14 @@ public class DefaultMessageStore implements MessageStore {
         return commitLog;
     }
 
+    /**
+     * @param group 消费者组
+     * @param topic 主题
+     * @param queueId
+     * @param offset 客户端拉消息使用位点
+     * @param maxMsgNums 32
+     * @param messageFilter 一般这里是 tagCode 过滤 在服务器这里
+     */
     public GetMessageResult getMessage(final String group, final String topic, final int queueId, final long offset,
         final int maxMsgNums,
         final MessageFilter messageFilter) {
@@ -565,71 +573,138 @@ public class DefaultMessageStore implements MessageStore {
             return null;
         }
 
+        // 查询开始时间
         long beginTime = this.getSystemClock().now();
 
+
+        // status 查询结果状态，默认值：NO_MESSAGE_IN_QUEUE  后面马上会改！
         GetMessageStatus status = GetMessageStatus.NO_MESSAGE_IN_QUEUE;
-        //待查找的队列的偏移量
+
+        // nextBeginOffset 客户端下一次 pull 时使用的 位点信息，默认值：pullRequest.offset   后面拉取到消息之后，也会修改该值
         long nextBeginOffset = offset;
+
+        // 表示queue的最小offset 和 最大 offset （注意：这里的单位 为 “CQData”）
         long minOffset = 0;
         long maxOffset = 0;
 
+        // 查询结果对象
         GetMessageResult getResult = new GetMessageResult();
 
+        // 获取commitLog 最大物理偏移量：当前正在顺序写的mf文件 文件名 long 值 + 顺序写文件的 position
         final long maxOffsetPy = this.commitLog.getMaxOffset();
 
-        //根据topic 和 queueId 查找consumerQueue
+        // 看源码得知，该方法不会返回null，会拿到指定主题指定queueid的ConsumeQueue对象
+        // （它是管理队列文件，存的是CQData(1.offsetPy 2. size 3.tagCode)）
         ConsumeQueue consumeQueue = findConsumeQueue(topic, queueId);
+
         if (consumeQueue != null) {
+            // 正常情况执行这里：
+
+
+            // 表示queue的最小offset 和 最大 offset （注意：这里的单位 为 “CQData”）
             minOffset = consumeQueue.getMinOffsetInQueue();
             maxOffset = consumeQueue.getMaxOffsetInQueue();
 
-            //当前队列没有消息
             if (maxOffset == 0) {
+                // 一定是 查询时调用 findConsumeQueue(..)导致创建了 该 ConsumeQueue 时，它的maxOffset 才会是0
+                // 队列内无数据，设置状态为 NO_MESSAGE_IN_QUEUE 外层“PullMessageProcess”会进行长轮询的
                 status = GetMessageStatus.NO_MESSAGE_IN_QUEUE;
+                // 调整offset 为0
                 nextBeginOffset = nextOffsetCorrection(offset, 0);
             } else if (offset < minOffset) {
+                // 设置状态“OFFSET_TOO_SMALL”...
                 status = GetMessageStatus.OFFSET_TOO_SMALL;
+                // 调整offset 为 minOffset
                 nextBeginOffset = nextOffsetCorrection(offset, minOffset);
             } else if (offset == maxOffset) {
+                // 说明客户端消费进度 和 该queue的消息进度 持平了...
+                // PullMessageProcess 会进入长轮询的逻辑..
                 status = GetMessageStatus.OFFSET_OVERFLOW_ONE;
+                // offset 不发生变化
                 nextBeginOffset = nextOffsetCorrection(offset, offset);
             } else if (offset > maxOffset) {
+                // 说明客户端请求使用的offset 一定是一个有问题的 offset
+                // 设置状态为“OFFSET_OVERFLOW_BADLY”
                 status = GetMessageStatus.OFFSET_OVERFLOW_BADLY;
+
+                // 根据 minOffset 是否为0，调整 nextBeginOffset....
                 if (0 == minOffset) {
                     nextBeginOffset = nextOffsetCorrection(offset, minOffset);
                 } else {
                     nextBeginOffset = nextOffsetCorrection(offset, maxOffset);
                 }
             } else {
-                //走到这里说明 当前队列 有消息
+                // 执行到该 else 代码块 说明 pullRequest.offset 是满足ConsumeQueue有效数据范围的offset
+
+
+                // 根据 offset 查询 CQData数据，CQData数据由 smbr 表示，smbr 内部有 byteBuffer
+                // bufferConsumeQueue数据范围：
+                // 1. 如果offset 命中的文件不是 正在顺序写的文件的话 [offset表示的这条消息，文件尾]
+                // 2. 如果offset 命中的文件是 正在顺序写的文件的话 [offset表示的这条消息，文件名+wrotePosition]
                 SelectMappedBufferResult bufferConsumeQueue = consumeQueue.getIndexBuffer(offset);
+
+                // 只有很极端的时候 才会 bufferConsumeQueue == null . 刚刚赶上 consumeQueue 删除过期数据的逻辑执行.
+
                 if (bufferConsumeQueue != null) {
                     try {
+
+                        // 初始状态为 未匹配到消息
                         status = GetMessageStatus.NO_MATCHED_MESSAGE;
 
+
+                        // 下一个commitLog物理文件名（初始值是 long 最小值..）
                         long nextPhyFileStartOffset = Long.MIN_VALUE;
+
+                        // 本次拉消息 最后一条消息 它的 物理偏移量
                         long maxPhyOffsetPulling = 0;
 
+
                         int i = 0;
+                        // 16000
                         final int maxFilterMessageCount = Math.max(16000, maxMsgNums * ConsumeQueue.CQ_STORE_UNIT_SIZE);
+
                         final boolean diskFallRecorded = this.messageStoreConfig.isDiskFallRecorded();
                         ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
+
+
+
                         for (; i < bufferConsumeQueue.getSize() && i < maxFilterMessageCount; i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                            // 从bufferConsumeQueue的byteBuffer中 读取 20 个字节
+
+                            // 消息物理偏移量 8byte
                             long offsetPy = bufferConsumeQueue.getByteBuffer().getLong();
+                            // 消息大小  4 byte
                             int sizePy = bufferConsumeQueue.getByteBuffer().getInt();
+                            // 消息 tagCode  8 byte
                             long tagsCode = bufferConsumeQueue.getByteBuffer().getLong();
 
+                            // 本次拉消息 最后一条消息 它的 物理偏移量
                             maxPhyOffsetPulling = offsetPy;
 
+                            // 回头看..
+                            //这里 条件成立(第二次循环时则会走到这里)，则说明 consumerQueue中的数据一直在被过滤中，
+                            // 也就是说 一直以commitLog中的数据为主，consumerQueue内存中的offset值都会以新的commitLog中的offset为主;
+                            //和下面的 null == selectResult 对应 --- #739 行代码
                             if (nextPhyFileStartOffset != Long.MIN_VALUE) {
                                 if (offsetPy < nextPhyFileStartOffset)
                                     continue;
                             }
 
+                            // 参数1：offsetPy，本次循环处理的CQData代表的消息 它的物理偏移量
+                            // 参数2：maxOffsetPy，当前broker节点 commitLog 内最大的物理偏移量
+                            // 返回值：boolean false 表示offsetPy这条消息为 “热数据” 否则 为 “冷数据”
                             boolean isInDisk = checkInDiskByCommitOffset(offsetPy, maxOffsetPy);
 
+
+                            // 控制是否跳出循环
+                            // 参数1：sizePy，本次循环CQData表示消息大小
+                            // 参数2：maxMsgNums  32
+                            // 参数3：getResult.getBufferTotalSize() 本次查询 已经获取的消息总size
+                            // 参数4：getResult.getMessageCount() 本次查询 已经获取的消息个数
+                            // 参数5：本轮循环处理的CQData表示的msg，是否为热数据  false 表示offsetPy这条消息为 “热数据” 否则 为 “冷数据”
                             if (this.isTheBatchFull(sizePy, maxMsgNums, getResult.getBufferTotalSize(), getResult.getMessageCount(),
                                 isInDisk)) {
+                                //一般是从这里跳出循环......
                                 break;
                             }
 
@@ -646,6 +721,8 @@ public class DefaultMessageStore implements MessageStore {
                                 }
                             }
 
+
+                            // 服务器端按照 消息 tagCode 进行过滤
                             if (messageFilter != null
                                 && !messageFilter.isMatchedByConsumeQueue(isTagsCodeLegal ? tagsCode : null, extRet ? cqExtUnit : null)) {
                                 if (getResult.getBufferTotalSize() == 0) {
@@ -655,12 +732,18 @@ public class DefaultMessageStore implements MessageStore {
                                 continue;
                             }
 
+
+
+                            // 根据 CQData.offsetPy 和 CQData.sizePy 到 commitLog 查询出这条msg，msg由 smbr表示
                             SelectMappedBufferResult selectResult = this.commitLog.getMessage(offsetPy, sizePy);
+
+                            // 什么时候 selectResult == null ?  查询之前 commitLog 删除过期文件的定时任务 刚刚好执行过，将包含offsetPy的数据文件 删除掉了..
                             if (null == selectResult) {
                                 if (getResult.getBufferTotalSize() == 0) {
                                     status = GetMessageStatus.MESSAGE_WAS_REMOVING;
                                 }
 
+                                // 获取包含该“offsetPy”数据文件的下一个数据文件的文件名（long）
                                 nextPhyFileStartOffset = this.commitLog.rollNextFile(offsetPy);
                                 continue;
                             }
@@ -675,9 +758,14 @@ public class DefaultMessageStore implements MessageStore {
                                 continue;
                             }
 
+
+
                             this.storeStatsService.getGetMessageTransferedMsgCount().incrementAndGet();
+                            // 将本次循环查询出来的 msg smbr 加入到 getResult 内
                             getResult.addMessage(selectResult);
+                            // 查询状态设置为 “FOUND”
                             status = GetMessageStatus.FOUND;
+                            // 强制设置 nextPhyFileStartOffset 为 long 最小值，避免走上面 跳过期CQData 数据的逻辑。
                             nextPhyFileStartOffset = Long.MIN_VALUE;
                         }
 
@@ -686,14 +774,22 @@ public class DefaultMessageStore implements MessageStore {
                             brokerStatsManager.recordDiskFallBehindSize(group, topic, queueId, fallBehind);
                         }
 
+                        // nextBeginOffset 客户端下一次 pull 时使用的 位点信息，默认值：pullRequest.offset   后面拉取到消息之后，也会修改该值
+                        // 怎么修改？ pull.offset + 上面for循环读取过的CQdata字节数 / 20
                         nextBeginOffset = offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
 
+                        // diff=commitLog最大物理偏移量 - 本次拉消息最后一条消息的物理偏移量
                         long diff = maxOffsetPy - maxPhyOffsetPulling;
+
+                        // 40% 系统内存
                         long memory = (long) (StoreUtil.TOTAL_PHYSICAL_MEMORY_SIZE
                             * (this.messageStoreConfig.getAccessMessageInMemoryMaxRatio() / 100.0));
+
+                        // diff > memory => true 表示本轮查询 最后一条消息 为 冷数据，broker服务器建议客户端下一次 pull时到 slave节点
+                        // diff > memory => false 表示本轮查询 最后一条消息 为 热数据，broker服务器建议客户端下一次 pull时到 master节点
                         getResult.setSuggestPullingFromSlave(diff > memory);
                     } finally {
-
+                        // 释放consumeQueue查询时返回的 smbr 对象
                         bufferConsumeQueue.release();
                     }
                 } else {
@@ -713,11 +809,15 @@ public class DefaultMessageStore implements MessageStore {
         } else {
             this.storeStatsService.getGetMessageTimesTotalMiss().incrementAndGet();
         }
+
         long elapsedTime = this.getSystemClock().now() - beginTime;
         this.storeStatsService.setGetMessageEntireTimeMax(elapsedTime);
 
+        // 设置结果状态
         getResult.setStatus(status);
+        // 设置客户端下一次pull时的offset
         getResult.setNextBeginOffset(nextBeginOffset);
+        // 设置queue的最大offset 和 最小 offset
         getResult.setMaxOffset(maxOffset);
         getResult.setMinOffset(minOffset);
         return getResult;
@@ -1251,38 +1351,59 @@ public class DefaultMessageStore implements MessageStore {
         return nextOffset;
     }
 
+    // 参数1：offsetPy，本次循环处理的CQData代表的消息 它的物理偏移量
+    // 参数2：maxOffsetPy，当前broker节点 commitLog 内最大的物理偏移量
+    // 返回值：boolean false 表示offsetPy这条消息为 “热数据” 否则 为 “冷数据”
     private boolean checkInDiskByCommitOffset(long offsetPy, long maxOffsetPy) {
+        // memory 系统40%内存的字节数
         long memory = (long) (StoreUtil.TOTAL_PHYSICAL_MEMORY_SIZE * (this.messageStoreConfig.getAccessMessageInMemoryMaxRatio() / 100.0));
         return (maxOffsetPy - offsetPy) > memory;
     }
 
+    // 参数1：sizePy，本次循环CQData表示消息大小
+    // 参数2：maxMsgNums  32
+    // 参数3：getResult.getBufferTotalSize() 本次查询 已经获取的消息总size
+    // 参数4：getResult.getMessageCount() 本次查询 已经获取的消息个数
+    // 参数5：本轮循环处理的CQData表示的msg，是否为热数据  false 表示offsetPy这条消息为 “热数据” 否则 为 “冷数据”
+    // 返回值：true 外层跳出循环   false 外层继续
     private boolean isTheBatchFull(int sizePy, int maxMsgNums, int bufferTotal, int messageTotal, boolean isInDisk) {
-
+        // 条件成立：说明本次pull消息，还未拉取到任何东西..需要外层for循环继续，返回false
         if (0 == bufferTotal || 0 == messageTotal) {
             return false;
         }
 
+        // 条件成立：说明结果对象内 消息数 已经 够量了（maxMsgNums）
         if (maxMsgNums <= messageTotal) {
             return true;
         }
 
+
         if (isInDisk) {
+            // CASE 冷数据
+
+            // 冷数据 pull 查询最多一次可以 pull 64kb 消息
             if ((bufferTotal + sizePy) > this.messageStoreConfig.getMaxTransferBytesOnMessageInDisk()) {
                 return true;
             }
 
+            // 冷数据 pull 查询最多一次可以 pull 8 条消息
             if (messageTotal > this.messageStoreConfig.getMaxTransferCountOnMessageInDisk() - 1) {
                 return true;
             }
         } else {
+            // CASE 热数据
+
+            // 热数据 pull 查询最多一次可以 pull 256kb 消息
             if ((bufferTotal + sizePy) > this.messageStoreConfig.getMaxTransferBytesOnMessageInMemory()) {
                 return true;
             }
 
+            // 热数据 pull 查询最多一次可以 pull 32 条消息
             if (messageTotal > this.messageStoreConfig.getMaxTransferCountOnMessageInMemory() - 1) {
                 return true;
             }
         }
+
 
         return false;
     }
