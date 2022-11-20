@@ -352,6 +352,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             @Override
             public void onSuccess(PullResult pullResult) {
                 if (pullResult != null) {
+                    //预处理 pullRequest的结果
                     //1. 处理拉取到的消息，进行解码成一条条消息，
                     //2. 执行tag模式的消息过滤；
                     //3. 执行hook操作了并且填充到pullResult.MsgFoundList中
@@ -423,15 +424,19 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
 
                             break;
                         case NO_NEW_MSG:
-                        case NO_MATCHED_MSG:
+                        case NO_MATCHED_MSG: // NO_NEW_MSG | NO_MATCHED_MSG 都表示 本次 pull 没有新的 可消费的 消息
+
+
+
                             //执行到这里说明拉取的消息列表为空，这里会将pullRequest重新放回队列中，使可以进行下一次的拉取任务，然后返回
                             pullRequest.setNextOffset(pullResult.getNextBeginOffset());
 
+                            //更新offsetStore， 该messageQueue 最新的 offset
                             DefaultMQPushConsumerImpl.this.correctTagsOffset(pullRequest);
                             //重新回放
                             DefaultMQPushConsumerImpl.this.executePullRequestImmediately(pullRequest);
                             break;
-                        case OFFSET_ILLEGAL:  //什么时候 OFFSET_ILLEGAL ? 本次 pull 时使用的 offset 是无效的，即offset > maxOffset || offset < minOffset
+                        case OFFSET_ILLEGAL:  //什么时候 OFFSET_ILLEGAL ? 本次 pull 时使用的 offset 是无效的，即（offset > maxOffset || offset < minOffset）
                             //执行到这里说明 拉取的offset 是非法的。
                             //这里会丢一个延迟任务，重新fix offset，删除不必要的队列，
                             log.warn("the pull request offset illegal, {} {}",
@@ -783,7 +788,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                         null);
                 }
 
-                //MQClientInstance 启动客户端实例
+                //MQClientInstance 启动客户端实例  !!!!
                 mQClientFactory.start();
                 log.info("the consumer [{}] start OK.", this.defaultMQPushConsumer.getConsumerGroup());
                 //设置消费者状态，running --- 运行中

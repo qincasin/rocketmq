@@ -81,6 +81,7 @@ public class PullAPIWrapper {
         this.updatePullFromWhichNode(mq, pullResultExt.getSuggestWhichBrokerId());
 
         if (PullStatus.FOUND == pullResult.getPullStatus()) {
+            //使用缓冲区 表示 messageBinary
             ByteBuffer byteBuffer = ByteBuffer.wrap(pullResultExt.getMessageBinary());
             //解码 ....
             List<MessageExt> msgList = MessageDecoder.decodes(byteBuffer);

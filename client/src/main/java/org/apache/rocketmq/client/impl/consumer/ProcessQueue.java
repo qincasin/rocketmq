@@ -209,7 +209,7 @@ public class ProcessQueue {
         return 0;
     }
 
-    //该方法将从ProcessQueue中移除部分消息，并行消费模式中使用。
+    //该方法将从ProcessQueue中移除部分消息，并发消费模式中使用。
     //方法调用点：ConsumeMessageConcurrentlyService#processConsumeResult-->
     //      removeMessage()方法在并发消费后进行调用，消息处理完之后将ProcessQueue中msgTreeMap红黑树的这批消息移除。
     public long removeMessage(final List<MessageExt> msgs) {

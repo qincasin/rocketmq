@@ -793,16 +793,18 @@ public class MQClientAPIImpl {
         final PullCallback pullCallback
     ) throws RemotingException, InterruptedException {
         //InvokeCallback
+
+        // invokeCallback 最重要
+        // invokeAsync 内部会为本次请求 创建 一个 ResponseFuture 对象，放入到 remotingClient的 responseFutureTable 中，
+        // key 是 request.opaque。
+        // 在ResponseFuture内部还有  { 1. opaque 2.invokeCallback  3. response} 这些信息
+        // 当服务器端 响应 客户端时，会根据response.opaque 值找到 当前 responseFuture 对象，将结果设置到 responseFuture.response 字段上。
+        // 再接下来，会检查该 responseFuture.invokeCallback 是否有值，如果有值，则说明需要回调处理。
+        // 再接下来，就将该invokeCallback封装成任务，提交到 remotingClient 的 公共线程内执行，执行invokeCallback  operationComplete 方法。
+        // 传递参数：responseFuture
         this.remotingClient.invokeAsync(addr, request, timeoutMillis, new InvokeCallback() {
 
-            // invokeCallback 最重要
-            // invokeAsync 内部会为本次请求 创建 一个 ResponseFuture 对象，放入到 remotingClient的 responseFutureTable 中，
-            // key 是 request.opaque。
-            // 在ResponseFuture内部还有  { 1. opaque 2.invokeCallback  3. response} 这些信息
-            // 当服务器端 响应 客户端时，会根据response.opaque 值找到 当前 responseFuture 对象，将结果设置到 responseFuture.response 字段上。
-            // 再接下来，会检查该 responseFuture.invokeCallback 是否有值，如果有值，则说明需要回调处理。
-            // 再接下来，就将该invokeCallback封装成任务，提交到 remotingClient 的 公共线程内执行，执行invokeCallback  operationComplete 方法。
-            // 传递参数：responseFuture
+            //调用时机： 服务端响应客户端之后
             @Override
             public void operationComplete(ResponseFuture responseFuture) {
                 //获取服务器端响应数据 response
@@ -811,6 +813,7 @@ public class MQClientAPIImpl {
                     try {
                         //处理响应，将响应封装为PullRequest对象
                         PullResult pullResult = MQClientAPIImpl.this.processPullResponse(response, addr);
+                        //这里获取到数据之后，pullResult#msgFoundList是为null的，其子类 PullResultExt 中是有值的。
 
                         assert pullResult != null;
 
