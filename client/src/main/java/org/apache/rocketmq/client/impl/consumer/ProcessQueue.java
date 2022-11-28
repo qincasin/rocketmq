@@ -106,10 +106,14 @@ public class ProcessQueue {
                 try {
                     //临时存放消息的treeMap不为空，并且 判断当前时间 - TreeMap里第一条消息的开始消费时间 > 15分钟
                     if (!msgTreeMap.isEmpty() && System.currentTimeMillis() - Long.parseLong(MessageAccessor.getConsumeStartTimeStamp(msgTreeMap.firstEntry().getValue())) > pushConsumer.getConsumeTimeout() * 60 * 1000) {
+                        //treemap中如果第一条消息 它的消费时间 和 系统时间 差值 >15 min ; 则取出该消息（注意：这一步并没有 将entry 从 treeMap中移除）
                         //把第一条消息拿出来
                         msg = msgTreeMap.firstEntry().getValue();
                     } else {
-
+                        //为什么会从这里跳出去呢？
+                        //快照队列内的消息  是有顺序的
+                        // a b c d e f g
+                        //a 不是过期的， b c d e f ... 这些消息肯定都不是过期的
                         break;
                     }
                 } finally {
@@ -121,12 +125,18 @@ public class ProcessQueue {
 
             try {
 
-                //把过期消息以延时消息方式重新发给broker，10s之后才能消费。
+                //把过期消息以延时消息方式重新发给broker，10s之后才能消费。   消息回退到服务器， 设置该消息的 延迟级别为3
                 pushConsumer.sendMessageBack(msg, 3);
                 log.info("send expire msg back. topic={}, msgId={}, storeHost={}, queueId={}, queueOffset={}", msg.getTopic(), msg.getMsgId(), msg.getStoreHost(), msg.getQueueId(), msg.getQueueOffset());
                 try {
                     this.lockTreeMap.writeLock().lockInterruptibly();
                     try {
+                        //条件不成立：说明在消息回退期间，消费任务 将 目标"消息" 成功消费了，成功消费后，消费任务会执行processConsumeResult
+                        //在这一步，会将目标"msg" 从msgTreeMap 移除....  就会导致 msg.getQueueOffset() == msgTreeMap.firstKey())  ==>false
+
+
+
+                        // 条件成立：消息回退期间， 该目标 "消息" 并没有被 消费任务 成功消费
                         if (!msgTreeMap.isEmpty() && msg.getQueueOffset() == msgTreeMap.firstKey()) {
                             try {
                                 //将过期消息从本地缓存中的消息列表中移除掉，  Collections.singletonList表示只有一个元素的List集合
@@ -212,6 +222,12 @@ public class ProcessQueue {
     //该方法将从ProcessQueue中移除部分消息，并发消费模式中使用。
     //方法调用点：ConsumeMessageConcurrentlyService#processConsumeResult-->
     //      removeMessage()方法在并发消费后进行调用，消息处理完之后将ProcessQueue中msgTreeMap红黑树的这批消息移除。
+    /**
+     * 删除消息
+     * @param msgs
+     * @return long  表示pq本地的消费进度 （1. -1 说明 pq 内无数据  2. queueOffsetMax + 1(删之前有消息，删完这批msgs之后 无消息了)
+     * 3. 删除完该批msgs之后 pq内 还有剩余待消费的消息，此时返回 firstMsg offset）
+     */
     public long removeMessage(final List<MessageExt> msgs) {
         long result = -1;
         final long now = System.currentTimeMillis();
@@ -298,6 +314,7 @@ public class ProcessQueue {
                 }
                 this.consumingMsgOrderlyTreeMap.clear();
                 if (offset != null) {
+                    // 消费者 下一条 要消费的消息 offset
                     return offset + 1;
                 }
             } finally {
@@ -310,6 +327,7 @@ public class ProcessQueue {
         return -1;
     }
 
+    // 回滚这批消息
     public void makeMessageToConsumeAgain(List<MessageExt> msgs) {
         try {
             this.lockTreeMap.writeLock().lockInterruptibly();
