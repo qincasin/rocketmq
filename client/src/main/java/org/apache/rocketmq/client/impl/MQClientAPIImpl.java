@@ -1183,11 +1183,17 @@ public class MQClientAPIImpl {
         ConsumerSendMsgBackRequestHeader requestHeader = new ConsumerSendMsgBackRequestHeader();
         RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.CONSUMER_SEND_MSG_BACK, requestHeader);
 
+        //消费者组
         requestHeader.setGroup(consumerGroup);
+        //原始消息主题
         requestHeader.setOriginTopic(msg.getTopic());
+        //消息的commitLogOffset
         requestHeader.setOffset(msg.getCommitLogOffset());
+        //延迟级别
         requestHeader.setDelayLevel(delayLevel);
+        //原始的msgId
         requestHeader.setOriginMsgId(msg.getMsgId());
+        //最大重试次数，默认16
         requestHeader.setMaxReconsumeTimes(maxConsumeRetryTimes);
 
         RemotingCommand response = this.remotingClient.invokeSync(MixAll.brokerVIPChannel(this.clientConfig.isVipChannelEnabled(), addr),

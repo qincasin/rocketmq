@@ -109,48 +109,79 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             this.brokerController.getMessageStore().isTransientStorePoolDeficient();
     }
 
+    /**
+     *
+     * @param ctx nettyChannel 上下文
+     * @param request 客户端请求对象 (RemotingCommand)
+     * @return
+     * @throws RemotingCommandException
+     */
     private CompletableFuture<RemotingCommand> asyncConsumerSendMsgBack(ChannelHandlerContext ctx,
                                                                         RemotingCommand request) throws RemotingCommandException {
+
+        // 创建服务器响应对象（response），注意 该 response 内部的header 为 null
         final RemotingCommand response = RemotingCommand.createResponseCommand(null);
+
+        // 解析出客户端请求头对象（ConsumerSendMsgBackRequestHeader）
         final ConsumerSendMsgBackRequestHeader requestHeader =
                 (ConsumerSendMsgBackRequestHeader)request.decodeCommandCustomHeader(ConsumerSendMsgBackRequestHeader.class);
         String namespace = NamespaceUtil.getNamespaceFromResource(requestHeader.getGroup());
+
         if (this.hasConsumeMessageHook() && !UtilAll.isBlank(requestHeader.getOriginMsgId())) {
             ConsumeMessageContext context = buildConsumeMessageContext(namespace, requestHeader, request);
             this.executeConsumeMessageHookAfter(context);
         }
+
+
+        // 获取消费者组的配置信息
         SubscriptionGroupConfig subscriptionGroupConfig =
             this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getGroup());
+
         if (null == subscriptionGroupConfig) {
+            // 返回客户端未找到 订阅组配置 状态码
             response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
             response.setRemark("subscription group not exist, " + requestHeader.getGroup() + " "
                 + FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST));
             return CompletableFuture.completedFuture(response);
         }
+
+
         if (!PermName.isWriteable(this.brokerController.getBrokerConfig().getBrokerPermission())) {
+            // 条件成立的话，说明该broker不支持写请求，直接返回客户端 NO_PERMISSION
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("the broker[" + this.brokerController.getBrokerConfig().getBrokerIP1() + "] sending message is forbidden");
             return CompletableFuture.completedFuture(response);
         }
 
+
         if (subscriptionGroupConfig.getRetryQueueNums() <= 0) {
+            // 条件成立，说明该 订阅组 配置的 信息为：该组不支持消息重试
+
+            // 这里直接返回 success
             response.setCode(ResponseCode.SUCCESS);
             response.setRemark(null);
             return CompletableFuture.completedFuture(response);
         }
 
-        //生成重试的topic     %RETRY% + groupName
+        // 获取消费者组的重试主题，规则：%RETRY%GroupName
         String newTopic = MixAll.getRetryTopic(requestHeader.getGroup());
+
+        // 计算重试主题下的queueId，这里计算出来的值 一般都是 0
         int queueIdInt = Math.abs(this.random.nextInt() % 99999999) % subscriptionGroupConfig.getRetryQueueNums();
+
         int topicSysFlag = 0;
         if (requestHeader.isUnitMode()) {
             topicSysFlag = TopicSysFlag.buildSysFlag(false, true);
         }
 
+
+        // 获取“重试主题”的配置信息，这一步获取出来的 主题配置，队列数为：1
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().createTopicInSendMessageBackMethod(
             newTopic,
             subscriptionGroupConfig.getRetryQueueNums(),
             PermName.PERM_WRITE | PermName.PERM_READ, topicSysFlag);
+
+
         if (null == topicConfig) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("topic[" + newTopic + "] not exist");
@@ -162,37 +193,53 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
             response.setRemark(String.format("the topic[%s] sending message is forbidden", newTopic));
             return CompletableFuture.completedFuture(response);
         }
-        //由于发送重试消息不包含消息体，所以需要根据消息偏移量从commitLog取出原消息msgExt
+        // 从存储模块根据 消息的物理offset 查询出该消息，内部先查询出这条消息的size，然后再根据 offset 和 size 查询出整条msg
         MessageExt msgExt = this.brokerController.getMessageStore().lookMessageByOffset(requestHeader.getOffset());
+
         if (null == msgExt) {
+            // 未查询到"需要回退处理"的消息，返回系统错误
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("look message by offset failed, " + requestHeader.getOffset());
             return CompletableFuture.completedFuture(response);
         }
 
+
+        // 获取“原始消息”的主题
         final String retryTopic = msgExt.getProperty(MessageConst.PROPERTY_RETRY_TOPIC);
+        // 条件成立：说明offset这条消息 是第一次被回退
         if (null == retryTopic) {
             //将msgExt的原本主题(假如是TestTopic) 存到property中，key为 "RETRY_TOPIC"
+            // 添加 “RETRY_TOPIC” 属性，值为 “消息的主题”
             MessageAccessor.putProperty(msgExt, MessageConst.PROPERTY_RETRY_TOPIC, msgExt.getTopic());
         }
+        //设置刷盘状态为异步
         msgExt.setWaitStoreMsgOK(false);
 
+        // 延迟级别（一般是 0）
         int delayLevel = requestHeader.getDelayLevel();
 
         //获取"最大的重试次数"，默认是16
         int maxReconsumeTimes = subscriptionGroupConfig.getRetryMaxTimes();
+
+        // 客户端从 3.4.9 版本之后，支持客户端控制 “最大延迟级别”，这里一般也是 16
         if (request.getVersion() >= MQVersion.Version.V3_4_9.ordinal()) {
             maxReconsumeTimes = requestHeader.getMaxReconsumeTimes();
         }
 
-        //默认最多重试次数16
+
+        // 条件成立：说明消息不支持再重试了，需要将该消息转入到 “死信”主题
         if (msgExt.getReconsumeTimes() >= maxReconsumeTimes 
             || delayLevel < 0) {
             //如果消息重试次数已经达到了最大重试次数 或者 延迟级别小于0
             //则再次改变主题为 DLQ + groupName  ---- 死信队列
+
+            // 获取消费者组的死信主题，规则：%DLQ%GroupName
             newTopic = MixAll.getDLQTopic(requestHeader.getGroup());
+
+            // 死信主题队列ID：0
             queueIdInt = Math.abs(this.random.nextInt() % 99999999) % DLQ_NUMS_PER_GROUP;
 
+            // 死信主题配置  只可写，不可读
             topicConfig = this.brokerController.getTopicConfigManager().createTopicInSendMessageBackMethod(newTopic,
                     DLQ_NUMS_PER_GROUP,
                     PermName.PERM_WRITE, 0);
@@ -202,33 +249,52 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 return CompletableFuture.completedFuture(response);
             }
         } else {
-            //如果没有延迟，就将延迟级别设置为3 + 已经重试的次数
+            // 常规情况，走这里..
+
+            // 条件成立：说明延迟级别由 broker 端控制..
             if (0 == delayLevel) {
+                // 延迟级别从3级开始，每重试一次，延迟级别+1
                 delayLevel = 3 + msgExt.getReconsumeTimes();
             }
+
+            // 将延迟级别设置进 消息属性 ，KEY: “DELAY”，存储时 会检查该属性，该属性值 > 0 的话，
+            // 会将消息的 主题 和 队列 再次修改，修改为 调度主题 和 调度队列ID
+            //!!!! 该值非常重要！!!!
             msgExt.setDelayTimeLevel(delayLevel);
         }
 
-        //创建一个新的消息msgInner ，将重试的消息复制到新的消息中
+
+        // 创建一条空消息
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
-        //这里设置topic为重试的topic ----> newTopic  --->%RETRY% + groupName
+        // 主题 “重试主题” 或者 “死信主题”
         msgInner.setTopic(newTopic);
+        // 这些字段都是从 offset查询出来的 msg 中 拷贝过来的
         msgInner.setBody(msgExt.getBody());
         msgInner.setFlag(msgExt.getFlag());
         MessageAccessor.setProperties(msgInner, msgExt.getProperties());
         msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgExt.getProperties()));
         msgInner.setTagsCode(MessageExtBrokerInner.tagsString2tagsCode(null, msgExt.getTags()));
 
+        // queueId 为 重试主题 或者 死信主题的queueId
         msgInner.setQueueId(queueIdInt);
         msgInner.setSysFlag(msgExt.getSysFlag());
         msgInner.setBornTimestamp(msgExt.getBornTimestamp());
         msgInner.setBornHost(msgExt.getBornHost());
         msgInner.setStoreHost(msgExt.getStoreHost());
+        // 重试次数为 原offset定位出来的msg 重试次数 + 1
         msgInner.setReconsumeTimes(msgExt.getReconsumeTimes() + 1);
 
+
+        // 获取出 最原始 msg 的 消息ID
         String originMsgId = MessageAccessor.getOriginMessageId(msgExt);
+
+        // UtilAll.isBlank(originMsgId) 返回true 说明msgExt 这条消息是第一次被返回到服务器，此时使用该msg的id做为  originMessageId
+        // UtilAll.isBlank(originMsgId) 返回false 说明“原始消息” 已经被重试不止1次了，此时使用 offset 查询出来的 msg 中的 originMessageId
         MessageAccessor.setOriginMessageId(msgInner, UtilAll.isBlank(originMsgId) ? msgExt.getMsgId() : originMsgId);
+
         CompletableFuture<PutMessageResult> putMessageResult = this.brokerController.getMessageStore().asyncPutMessage(msgInner);
+
+        //响应
         return putMessageResult.thenApply((r) -> {
             if (r != null) {
                 switch (r.getPutMessageStatus()) {
