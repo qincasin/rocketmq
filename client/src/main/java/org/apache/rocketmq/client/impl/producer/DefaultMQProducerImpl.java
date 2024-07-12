@@ -266,7 +266,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         //怎么实现的呢？
         //生产者 msg 加了一些信息 关联ID 客户端ID，发送到broker 之后
         //消费者从 broker 拿到这条消息，检查msg 类型 ，发现是一个 需要回执的消息
-        //处理完消息之后，根据msg 关联ID 和 客户端ID 声场一条消息 (封装响应给 生产者的结果) 发送给broker
+        //处理完消息之后，根据msg 关联ID 和 客户端ID 生成一条消息 (封装响应给 生产者的结果) 发送给broker
         //Broker 拿到这条消息之后，它知道 这是一条回执消息，根据客户端ID 找到channel，将消息推送给生产者
         //生产者这边拿到 回执消息之后读取出来 关联ID 找到对应的 RequestFuture ，调用其release方法，将阻塞的线程唤醒。
         //类似于生产者和消费者之间 进行了 一次 PRC，只不过中间 由 broker 代理完成的

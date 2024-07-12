@@ -207,8 +207,11 @@ public class ConsumeMessageOrderlyService implements ConsumeMessageService {
 
     /**
      * 参数1：msgs 在这里无效
+     * <p>
      * 参数2：processQueue  msgs 归属的pq
+     * <p>
      * 参数3：messageQueue 队列信息
+     * <p>
      * 参数4：dispathToConsume  重要，true的情况 则创建 消费任务，并提交，false不创建消费任务 ，false 说明 消费者本地 已经有消费任务 在执行了
      */
     @Override

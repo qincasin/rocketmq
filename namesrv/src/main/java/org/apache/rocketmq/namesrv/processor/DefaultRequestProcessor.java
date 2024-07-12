@@ -327,7 +327,7 @@ public class DefaultRequestProcessor extends AsyncNettyRequestProcessor implemen
         // 参数5：ha 节点 ip信息
         // 参数6：当前节点的主题信息
         // 参数7：过滤服务器列表... 以后在说
-        // 参数7：当年服务器 和 客户端 通信的channel
+        // 参数7：当前服务器 和 客户端 通信的channel
 
         /**
          * 主要是做注册方法

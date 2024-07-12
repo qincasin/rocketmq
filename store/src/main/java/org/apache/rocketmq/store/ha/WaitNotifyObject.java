@@ -23,6 +23,7 @@ import org.apache.rocketmq.logging.InternalLoggerFactory;
 import java.util.HashMap;
 import java.util.Map;
 
+//线程之间通信的对象
 public class WaitNotifyObject {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
