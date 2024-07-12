@@ -16,6 +16,33 @@
  */
 package org.apache.rocketmq.store.dledger;
 
+import java.net.Inet6Address;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+import org.apache.rocketmq.common.UtilAll;
+import org.apache.rocketmq.common.message.MessageDecoder;
+import org.apache.rocketmq.common.message.MessageExtBatch;
+import org.apache.rocketmq.common.message.MessageExtBrokerInner;
+import org.apache.rocketmq.common.message.MessageVersion;
+import org.apache.rocketmq.common.sysflag.MessageSysFlag;
+import org.apache.rocketmq.store.AppendMessageResult;
+import org.apache.rocketmq.store.AppendMessageStatus;
+import org.apache.rocketmq.store.CommitLog;
+import org.apache.rocketmq.store.DefaultMessageStore;
+import org.apache.rocketmq.store.DispatchRequest;
+import org.apache.rocketmq.store.MessageExtEncoder;
+import org.apache.rocketmq.store.PutMessageResult;
+import org.apache.rocketmq.store.PutMessageStatus;
+import org.apache.rocketmq.store.SelectMappedBufferResult;
+import org.apache.rocketmq.store.StoreStatsService;
+import org.apache.rocketmq.store.config.MessageStoreConfig;
+import org.apache.rocketmq.store.logfile.MappedFile;
+import org.rocksdb.RocksDBException;
+
 import io.openmessaging.storage.dledger.AppendFuture;
 import io.openmessaging.storage.dledger.BatchAppendFuture;
 import io.openmessaging.storage.dledger.DLedgerConfig;
@@ -30,37 +57,16 @@ import io.openmessaging.storage.dledger.store.file.MmapFile;
 import io.openmessaging.storage.dledger.store.file.MmapFileList;
 import io.openmessaging.storage.dledger.store.file.SelectMmapBufferResult;
 import io.openmessaging.storage.dledger.utils.DLedgerUtils;
-import java.net.Inet6Address;
-import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import org.apache.rocketmq.common.UtilAll;
-import org.apache.rocketmq.common.message.MessageAccessor;
-import org.apache.rocketmq.common.message.MessageConst;
-import org.apache.rocketmq.common.message.MessageDecoder;
-import org.apache.rocketmq.common.message.MessageExtBatch;
-import org.apache.rocketmq.common.sysflag.MessageSysFlag;
-import org.apache.rocketmq.common.topic.TopicValidator;
-import org.apache.rocketmq.store.AppendMessageResult;
-import org.apache.rocketmq.store.AppendMessageStatus;
-import org.apache.rocketmq.store.CommitLog;
-import org.apache.rocketmq.store.DefaultMessageStore;
-import org.apache.rocketmq.store.DispatchRequest;
-import org.apache.rocketmq.store.MappedFile;
-import org.apache.rocketmq.store.MessageExtBrokerInner;
-import org.apache.rocketmq.store.PutMessageResult;
-import org.apache.rocketmq.store.PutMessageStatus;
-import org.apache.rocketmq.store.SelectMappedBufferResult;
-import org.apache.rocketmq.store.StoreStatsService;
-import org.apache.rocketmq.store.schedule.ScheduleMessageService;
 
 /**
  * Store all metadata downtime for recovery, data protection reliability
  */
 public class DLedgerCommitLog extends CommitLog {
+
+    static {
+        System.setProperty("dLedger.multiPath.Splitter", MessageStoreConfig.MULTI_PATH_SPLITTER);
+    }
+
     private final DLedgerServer dLedgerServer;
     private final DLedgerConfig dLedgerConfig;
     private final DLedgerMmapFileStore dLedgerFileStore;
@@ -88,13 +94,16 @@ public class DLedgerCommitLog extends CommitLog {
         dLedgerConfig.setGroup(defaultMessageStore.getMessageStoreConfig().getdLegerGroup());
         dLedgerConfig.setPeers(defaultMessageStore.getMessageStoreConfig().getdLegerPeers());
         dLedgerConfig.setStoreBaseDir(defaultMessageStore.getMessageStoreConfig().getStorePathRootDir());
+        dLedgerConfig.setDataStorePath(defaultMessageStore.getMessageStoreConfig().getStorePathDLedgerCommitLog());
+        dLedgerConfig.setReadOnlyDataStoreDirs(defaultMessageStore.getMessageStoreConfig().getReadOnlyCommitLogStorePaths());
         dLedgerConfig.setMappedFileSizeForEntryData(defaultMessageStore.getMessageStoreConfig().getMappedFileSizeCommitLog());
         dLedgerConfig.setDeleteWhen(defaultMessageStore.getMessageStoreConfig().getDeleteWhen());
         dLedgerConfig.setFileReservedHours(defaultMessageStore.getMessageStoreConfig().getFileReservedTime() + 1);
         dLedgerConfig.setPreferredLeaderId(defaultMessageStore.getMessageStoreConfig().getPreferredLeaderId());
         dLedgerConfig.setEnableBatchPush(defaultMessageStore.getMessageStoreConfig().isEnableBatchPush());
+        dLedgerConfig.setDiskSpaceRatioToCheckExpired(defaultMessageStore.getMessageStoreConfig().getDiskMaxUsedSpaceRatio() / 100f);
 
-        id = Integer.valueOf(dLedgerConfig.getSelfId().substring(1)) + 1;
+        id = Integer.parseInt(dLedgerConfig.getSelfId().substring(1)) + 1;
         dLedgerServer = new DLedgerServer(dLedgerConfig);
         dLedgerFileStore = (DLedgerMmapFileStore) dLedgerServer.getdLedgerStore();
         DLedgerMmapFileStore.AppendHook appendHook = (entry, buffer, bodyOffset) -> {
@@ -156,7 +165,12 @@ public class DLedgerCommitLog extends CommitLog {
         if (!mappedFileQueue.getMappedFiles().isEmpty()) {
             return mappedFileQueue.getMinOffset();
         }
-        return dLedgerFileList.getMinOffset();
+        for (MmapFile file : dLedgerFileList.getMappedFiles()) {
+            if (file.isAvailable()) {
+                return file.getFileFromOffset() + file.getStartPosition();
+            }
+        }
+        return 0;
     }
 
     @Override
@@ -259,9 +273,26 @@ public class DLedgerCommitLog extends CommitLog {
         return null;
     }
 
-    private void recover(long maxPhyOffsetOfConsumeQueue) {
+    @Override
+    public boolean getData(final long offset, final int size, final ByteBuffer byteBuffer) {
+        if (offset < dividedCommitlogOffset) {
+            return super.getData(offset, size, byteBuffer);
+        }
+        if (offset >= dLedgerFileStore.getCommittedPos()) {
+            return false;
+        }
+        int mappedFileSize = this.dLedgerServer.getdLedgerConfig().getMappedFileSizeForEntryData();
+        MmapFile mappedFile = this.dLedgerFileList.findMappedFileByOffset(offset, offset == 0);
+        if (mappedFile != null) {
+            int pos = (int) (offset % mappedFileSize);
+            return mappedFile.getData(pos, size, byteBuffer);
+        }
+        return false;
+    }
+
+    private void dledgerRecoverNormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         dLedgerFileStore.load();
-        if (dLedgerFileList.getMappedFiles().size() > 0) {
+        if (!dLedgerFileList.getMappedFiles().isEmpty()) {
             dLedgerFileStore.recover();
             dividedCommitlogOffset = dLedgerFileList.getFirstMappedFile().getFileFromOffset();
             MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
@@ -278,9 +309,93 @@ public class DLedgerCommitLog extends CommitLog {
         }
         //Indicate that, it is the first time to load mixed commitlog, need to recover the old commitlog
         isInrecoveringOldCommitlog = true;
-        //No need the abnormal recover
         super.recoverNormally(maxPhyOffsetOfConsumeQueue);
         isInrecoveringOldCommitlog = false;
+
+        setRecoverPosition();
+
+    }
+
+    private void dledgerRecoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
+        boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
+        dLedgerFileStore.load();
+        if (!dLedgerFileList.getMappedFiles().isEmpty()) {
+            dLedgerFileStore.recover();
+            dividedCommitlogOffset = dLedgerFileList.getFirstMappedFile().getFileFromOffset();
+            MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
+            if (mappedFile != null) {
+                disableDeleteDledger();
+            }
+            List<MmapFile> mmapFiles = dLedgerFileList.getMappedFiles();
+            int index = mmapFiles.size() - 1;
+            MmapFile mmapFile = null;
+            for (; index >= 0; index--) {
+                mmapFile = mmapFiles.get(index);
+                if (isMmapFileMatchedRecover(mmapFile)) {
+                    log.info("dledger recover from this mappFile " + mmapFile.getFileName());
+                    break;
+                }
+            }
+
+            if (index < 0) {
+                index = 0;
+                mmapFile = mmapFiles.get(index);
+            }
+
+            ByteBuffer byteBuffer = mmapFile.sliceByteBuffer();
+            long processOffset = mmapFile.getFileFromOffset();
+            long mmapFileOffset = 0;
+            while (true) {
+                DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover, true);
+                int size = dispatchRequest.getMsgSize();
+
+                if (dispatchRequest.isSuccess()) {
+                    if (size > 0) {
+                        mmapFileOffset += size;
+                        if (this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable()) {
+                            if (dispatchRequest.getCommitLogOffset() < this.defaultMessageStore.getConfirmOffset()) {
+                                this.defaultMessageStore.doDispatch(dispatchRequest);
+                            }
+                        } else {
+                            this.defaultMessageStore.doDispatch(dispatchRequest);
+                        }
+                    } else if (size == 0) {
+                        index++;
+                        if (index >= mmapFiles.size()) {
+                            log.info("dledger recover physics file over, last mapped file " + mmapFile.getFileName());
+                            break;
+                        } else {
+                            mmapFile = mmapFiles.get(index);
+                            byteBuffer = mmapFile.sliceByteBuffer();
+                            processOffset = mmapFile.getFileFromOffset();
+                            mmapFileOffset = 0;
+                            log.info("dledger recover next physics file, " + mmapFile.getFileName());
+                        }
+                    }
+                } else {
+                    log.info("dledger recover physics file end, " + mmapFile.getFileName() + " pos=" + byteBuffer.position());
+                    break;
+                }
+            }
+
+            processOffset += mmapFileOffset;
+
+            if (maxPhyOffsetOfConsumeQueue >= processOffset) {
+                log.warn("dledger maxPhyOffsetOfConsumeQueue({}) >= processOffset({}), truncate dirty logic files", maxPhyOffsetOfConsumeQueue, processOffset);
+                this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
+            }
+            return;
+        }
+        isInrecoveringOldCommitlog = true;
+        super.recoverAbnormally(maxPhyOffsetOfConsumeQueue);
+
+        isInrecoveringOldCommitlog = false;
+
+        setRecoverPosition();
+
+    }
+
+    private void setRecoverPosition() {
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
         if (mappedFile == null) {
             return;
@@ -312,26 +427,64 @@ public class DLedgerCommitLog extends CommitLog {
         log.info("Will set the initial commitlog offset={} for dledger", dividedCommitlogOffset);
     }
 
-    @Override
-    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) {
-        recover(maxPhyOffsetOfConsumeQueue);
+    private boolean isMmapFileMatchedRecover(final MmapFile mmapFile) {
+        ByteBuffer byteBuffer = mmapFile.sliceByteBuffer();
+
+        int magicCode = byteBuffer.getInt(DLedgerEntry.BODY_OFFSET + MessageDecoder.MESSAGE_MAGIC_CODE_POSITION);
+        if (magicCode != MESSAGE_MAGIC_CODE) {
+            return false;
+        }
+
+        int storeTimestampPosition;
+        int sysFlag = byteBuffer.getInt(DLedgerEntry.BODY_OFFSET + MessageDecoder.SYSFLAG_POSITION);
+        if ((sysFlag & MessageSysFlag.BORNHOST_V6_FLAG) == 0) {
+            storeTimestampPosition = MessageDecoder.MESSAGE_STORE_TIMESTAMP_POSITION;
+        } else {
+            // v6 address is 12 byte larger than v4
+            storeTimestampPosition = MessageDecoder.MESSAGE_STORE_TIMESTAMP_POSITION + 12;
+        }
+
+        long storeTimestamp = byteBuffer.getLong(DLedgerEntry.BODY_OFFSET + storeTimestampPosition);
+        if (storeTimestamp == 0) {
+            return false;
+        }
+
+        if (this.defaultMessageStore.getMessageStoreConfig().isMessageIndexEnable()
+                && this.defaultMessageStore.getMessageStoreConfig().isMessageIndexSafe()) {
+            if (storeTimestamp <= this.defaultMessageStore.getStoreCheckpoint().getMinTimestampIndex()) {
+                log.info("dledger find check timestamp, {} {}",
+                    storeTimestamp,
+                    UtilAll.timeMillisToHumanString(storeTimestamp));
+                return true;
+            }
+        } else {
+            if (storeTimestamp <= this.defaultMessageStore.getStoreCheckpoint().getMinTimestamp()) {
+                log.info("dledger find check timestamp, {} {}",
+                    storeTimestamp,
+                    UtilAll.timeMillisToHumanString(storeTimestamp));
+                return true;
+            }
+        }
+
+        return false;
+
     }
 
     @Override
-    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) {
-        recover(maxPhyOffsetOfConsumeQueue);
+    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
+        dledgerRecoverNormally(maxPhyOffsetOfConsumeQueue);
     }
 
     @Override
-    public DispatchRequest checkMessageAndReturnSize(ByteBuffer byteBuffer, final boolean checkCRC) {
-        return this.checkMessageAndReturnSize(byteBuffer, checkCRC, true);
+    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
+        dledgerRecoverAbnormally(maxPhyOffsetOfConsumeQueue);
     }
 
     @Override
     public DispatchRequest checkMessageAndReturnSize(ByteBuffer byteBuffer, final boolean checkCRC,
-        final boolean readBody) {
+        final boolean checkDupInfo, final boolean readBody) {
         if (isInrecoveringOldCommitlog) {
-            return super.checkMessageAndReturnSize(byteBuffer, checkCRC, readBody);
+            return super.checkMessageAndReturnSize(byteBuffer, checkCRC, checkDupInfo, readBody);
         }
         try {
             int bodyOffset = DLedgerEntry.BODY_OFFSET;
@@ -339,15 +492,17 @@ public class DLedgerCommitLog extends CommitLog {
             int magic = byteBuffer.getInt();
             //In dledger, this field is size, it must be gt 0, so it could prevent collision
             int magicOld = byteBuffer.getInt();
-            if (magicOld == CommitLog.BLANK_MAGIC_CODE || magicOld == CommitLog.MESSAGE_MAGIC_CODE) {
+            if (magicOld == CommitLog.BLANK_MAGIC_CODE
+                || magicOld == MessageDecoder.MESSAGE_MAGIC_CODE
+                || magicOld == MessageDecoder.MESSAGE_MAGIC_CODE_V2) {
                 byteBuffer.position(pos);
-                return super.checkMessageAndReturnSize(byteBuffer, checkCRC, readBody);
+                return super.checkMessageAndReturnSize(byteBuffer, checkCRC, checkDupInfo, readBody);
             }
             if (magic == MmapFileList.BLANK_MAGIC_CODE) {
                 return new DispatchRequest(0, true);
             }
             byteBuffer.position(pos + bodyOffset);
-            DispatchRequest dispatchRequest = super.checkMessageAndReturnSize(byteBuffer, checkCRC, readBody);
+            DispatchRequest dispatchRequest = super.checkMessageAndReturnSize(byteBuffer, checkCRC, checkDupInfo, readBody);
             if (dispatchRequest.isSuccess()) {
                 dispatchRequest.setBufferSize(dispatchRequest.getMsgSize() + bodyOffset);
             } else if (dispatchRequest.getMsgSize() > 0) {
@@ -378,29 +533,6 @@ public class DLedgerCommitLog extends CommitLog {
         // on the client)
         msg.setBodyCRC(UtilAll.crc32(msg.getBody()));
 
-        //should be consistent with the old version
-        if (tranType == MessageSysFlag.TRANSACTION_NOT_TYPE
-            || tranType == MessageSysFlag.TRANSACTION_COMMIT_TYPE) {
-            // Delay Delivery
-            if (msg.getDelayTimeLevel() > 0) {
-                if (msg.getDelayTimeLevel() > this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel()) {
-                    msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
-                }
-
-
-                String topic = TopicValidator.RMQ_SYS_SCHEDULE_TOPIC;
-                int queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
-
-                // Backup real topic, queueId
-                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
-                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
-                msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
-
-                msg.setTopic(topic);
-                msg.setQueueId(queueId);
-            }
-        }
-
         InetSocketAddress bornSocketAddress = (InetSocketAddress) msg.getBornHost();
         if (bornSocketAddress.getAddress() instanceof Inet6Address) {
             msg.setBornHostV6Flag();
@@ -423,60 +555,65 @@ public class DLedgerCommitLog extends CommitLog {
 
         final String finalTopic = msg.getTopic();
 
+        msg.setVersion(MessageVersion.MESSAGE_VERSION_V1);
+        boolean autoMessageVersionOnTopicLen =
+            this.defaultMessageStore.getMessageStoreConfig().isAutoMessageVersionOnTopicLen();
+        if (autoMessageVersionOnTopicLen && msg.getTopic().length() > Byte.MAX_VALUE) {
+            msg.setVersion(MessageVersion.MESSAGE_VERSION_V2);
+        }
+
         // Back to Results
         AppendMessageResult appendResult;
         AppendFuture<AppendEntryResponse> dledgerFuture;
         EncodeResult encodeResult;
 
-        encodeResult = this.messageSerializer.serialize(msg);
-        if (encodeResult.status != AppendMessageStatus.PUT_OK) {
-            return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, new AppendMessageResult(encodeResult.status)));
-        }
-        putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
-        long elapsedTimeInLock;
-        long queueOffset;
+        String topicQueueKey = msg.getTopic() + "-" + msg.getQueueId();
+        topicQueueLock.lock(topicQueueKey);
         try {
-            beginTimeInDledgerLock = this.defaultMessageStore.getSystemClock().now();
-            queueOffset = getQueueOffsetByKey(encodeResult.queueOffsetKey, tranType);
-            encodeResult.setQueueOffsetKey(queueOffset, false);
-            AppendEntryRequest request = new AppendEntryRequest();
-            request.setGroup(dLedgerConfig.getGroup());
-            request.setRemoteId(dLedgerServer.getMemberState().getSelfId());
-            request.setBody(encodeResult.getData());
-            dledgerFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
-            if (dledgerFuture.getPos() == -1) {
-                return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.OS_PAGECACHE_BUSY, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
-            }
-            long wroteOffset = dledgerFuture.getPos() + DLedgerEntry.BODY_OFFSET;
+            defaultMessageStore.assignOffset(msg);
 
-            int msgIdLength = (msg.getSysFlag() & MessageSysFlag.STOREHOSTADDRESS_V6_FLAG) == 0 ? 4 + 4 + 8 : 16 + 4 + 8;
-            ByteBuffer buffer = ByteBuffer.allocate(msgIdLength);
-
-            String msgId = MessageDecoder.createMessageId(buffer, msg.getStoreHostBytes(), wroteOffset);
-            elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginTimeInDledgerLock;
-            appendResult = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, encodeResult.getData().length, msgId, System.currentTimeMillis(), queueOffset, elapsedTimeInLock);
-            switch (tranType) {
-                case MessageSysFlag.TRANSACTION_PREPARED_TYPE:
-                case MessageSysFlag.TRANSACTION_ROLLBACK_TYPE:
-                    break;
-                case MessageSysFlag.TRANSACTION_NOT_TYPE:
-                case MessageSysFlag.TRANSACTION_COMMIT_TYPE:
-                    // The next update ConsumeQueue information
-                    DLedgerCommitLog.this.topicQueueTable.put(encodeResult.queueOffsetKey, queueOffset + 1);
-                    break;
-                default:
-                    break;
+            encodeResult = this.messageSerializer.serialize(msg);
+            if (encodeResult.status != AppendMessageStatus.PUT_OK) {
+                return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, new AppendMessageResult(encodeResult.status)));
             }
+            putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
+            long elapsedTimeInLock;
+            long queueOffset;
+            try {
+                beginTimeInDledgerLock = this.defaultMessageStore.getSystemClock().now();
+                queueOffset = getQueueOffsetByKey(msg, tranType);
+                encodeResult.setQueueOffsetKey(queueOffset, false);
+                AppendEntryRequest request = new AppendEntryRequest();
+                request.setGroup(dLedgerConfig.getGroup());
+                request.setRemoteId(dLedgerServer.getMemberState().getSelfId());
+                request.setBody(encodeResult.getData());
+                dledgerFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
+                if (dledgerFuture.getPos() == -1) {
+                    return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.OS_PAGE_CACHE_BUSY, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
+                }
+                long wroteOffset = dledgerFuture.getPos() + DLedgerEntry.BODY_OFFSET;
+
+                int msgIdLength = (msg.getSysFlag() & MessageSysFlag.STOREHOSTADDRESS_V6_FLAG) == 0 ? 4 + 4 + 8 : 16 + 4 + 8;
+                ByteBuffer buffer = ByteBuffer.allocate(msgIdLength);
+
+                String msgId = MessageDecoder.createMessageId(buffer, msg.getStoreHostBytes(), wroteOffset);
+                elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginTimeInDledgerLock;
+                appendResult = new AppendMessageResult(AppendMessageStatus.PUT_OK, wroteOffset, encodeResult.getData().length, msgId, System.currentTimeMillis(), queueOffset, elapsedTimeInLock);
+            } finally {
+                beginTimeInDledgerLock = 0;
+                putMessageLock.unlock();
+            }
+
+            if (elapsedTimeInLock > 500) {
+                log.warn("[NOTIFYME]putMessage in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}", elapsedTimeInLock, msg.getBody().length, appendResult);
+            }
+
+            defaultMessageStore.increaseOffset(msg, getMessageNum(msg));
         } catch (Exception e) {
             log.error("Put message error", e);
             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
         } finally {
-            beginTimeInDledgerLock = 0;
-            putMessageLock.unlock();
-        }
-
-        if (elapsedTimeInLock > 500) {
-            log.warn("[NOTIFYME]putMessage in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}", elapsedTimeInLock, msg.getBody().length, appendResult);
+            topicQueueLock.unlock(topicQueueKey);
         }
 
         return dledgerFuture.thenApply(appendEntryResponse -> {
@@ -492,11 +629,11 @@ public class DLedgerCommitLog extends CommitLog {
                     putMessageStatus = PutMessageStatus.SERVICE_NOT_AVAILABLE;
                     break;
                 case WAIT_QUORUM_ACK_TIMEOUT:
-                    //Do not return flush_slave_timeout to the client, for the ons client will ignore it.
-                    putMessageStatus = PutMessageStatus.OS_PAGECACHE_BUSY;
+                    //Do not return flush_slave_timeout to the client, for the client will ignore it.
+                    putMessageStatus = PutMessageStatus.IN_SYNC_REPLICAS_NOT_ENOUGH;
                     break;
                 case LEADER_PENDING_FULL:
-                    putMessageStatus = PutMessageStatus.OS_PAGECACHE_BUSY;
+                    putMessageStatus = PutMessageStatus.OS_PAGE_CACHE_BUSY;
                     break;
             }
             PutMessageResult putMessageResult = new PutMessageResult(putMessageStatus, appendResult);
@@ -535,6 +672,13 @@ public class DLedgerCommitLog extends CommitLog {
             messageExtBatch.setStoreHostAddressV6Flag();
         }
 
+        messageExtBatch.setVersion(MessageVersion.MESSAGE_VERSION_V1);
+        boolean autoMessageVersionOnTopicLen =
+            this.defaultMessageStore.getMessageStoreConfig().isAutoMessageVersionOnTopicLen();
+        if (autoMessageVersionOnTopicLen && messageExtBatch.getTopic().length() > Byte.MAX_VALUE) {
+            messageExtBatch.setVersion(MessageVersion.MESSAGE_VERSION_V2);
+        }
+
         // Back to Results
         AppendMessageResult appendResult;
         BatchAppendFuture<AppendEntryResponse> dledgerFuture;
@@ -543,67 +687,77 @@ public class DLedgerCommitLog extends CommitLog {
         encodeResult = this.messageSerializer.serialize(messageExtBatch);
         if (encodeResult.status != AppendMessageStatus.PUT_OK) {
             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, new AppendMessageResult(encodeResult
-                    .status)));
+                .status)));
         }
 
-        putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
-        msgIdBuilder.setLength(0);
-        long elapsedTimeInLock;
-        long queueOffset;
-        int msgNum = 0;
+        int batchNum = encodeResult.batchData.size();
+        topicQueueLock.lock(encodeResult.queueOffsetKey);
         try {
-            beginTimeInDledgerLock = this.defaultMessageStore.getSystemClock().now();
-            queueOffset = getQueueOffsetByKey(encodeResult.queueOffsetKey, tranType);
-            encodeResult.setQueueOffsetKey(queueOffset, true);
-            BatchAppendEntryRequest request = new BatchAppendEntryRequest();
-            request.setGroup(dLedgerConfig.getGroup());
-            request.setRemoteId(dLedgerServer.getMemberState().getSelfId());
-            request.setBatchMsgs(encodeResult.batchData);
-            AppendFuture<AppendEntryResponse> appendFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
-            if (appendFuture.getPos() == -1) {
-                log.warn("HandleAppend return false due to error code {}", appendFuture.get().getCode());
-                return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.OS_PAGECACHE_BUSY, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
-            }
-            dledgerFuture = (BatchAppendFuture<AppendEntryResponse>) appendFuture;
+            defaultMessageStore.assignOffset(messageExtBatch);
 
-            long wroteOffset = 0;
-
-            int msgIdLength = (messageExtBatch.getSysFlag() & MessageSysFlag.STOREHOSTADDRESS_V6_FLAG) == 0 ? 4 + 4 + 8 : 16 + 4 + 8;
-            ByteBuffer buffer = ByteBuffer.allocate(msgIdLength);
-
-            boolean isFirstOffset = true;
-            long firstWroteOffset = 0;
-            for (long pos : dledgerFuture.getPositions()) {
-                wroteOffset = pos + DLedgerEntry.BODY_OFFSET;
-                if (isFirstOffset) {
-                    firstWroteOffset = wroteOffset;
-                    isFirstOffset = false;
+            putMessageLock.lock(); //spin or ReentrantLock ,depending on store config
+            msgIdBuilder.setLength(0);
+            long elapsedTimeInLock;
+            long queueOffset;
+            int msgNum = 0;
+            try {
+                beginTimeInDledgerLock = this.defaultMessageStore.getSystemClock().now();
+                queueOffset = getQueueOffsetByKey(messageExtBatch, tranType);
+                encodeResult.setQueueOffsetKey(queueOffset, true);
+                BatchAppendEntryRequest request = new BatchAppendEntryRequest();
+                request.setGroup(dLedgerConfig.getGroup());
+                request.setRemoteId(dLedgerServer.getMemberState().getSelfId());
+                request.setBatchMsgs(encodeResult.batchData);
+                AppendFuture<AppendEntryResponse> appendFuture = (AppendFuture<AppendEntryResponse>) dLedgerServer.handleAppend(request);
+                if (appendFuture.getPos() == -1) {
+                    log.warn("HandleAppend return false due to error code {}", appendFuture.get().getCode());
+                    return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.OS_PAGE_CACHE_BUSY, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
                 }
-                String msgId = MessageDecoder.createMessageId(buffer, messageExtBatch.getStoreHostBytes(), wroteOffset);
-                if (msgIdBuilder.length() > 0) {
-                    msgIdBuilder.append(',').append(msgId);
-                } else {
-                    msgIdBuilder.append(msgId);
-                }
-                msgNum++;
-            }
+                dledgerFuture = (BatchAppendFuture<AppendEntryResponse>) appendFuture;
 
-            elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginTimeInDledgerLock;
-            appendResult = new AppendMessageResult(AppendMessageStatus.PUT_OK, firstWroteOffset, encodeResult.totalMsgLen,
+                long wroteOffset = 0;
+
+                int msgIdLength = (messageExtBatch.getSysFlag() & MessageSysFlag.STOREHOSTADDRESS_V6_FLAG) == 0 ? 4 + 4 + 8 : 16 + 4 + 8;
+                ByteBuffer buffer = ByteBuffer.allocate(msgIdLength);
+
+                boolean isFirstOffset = true;
+                long firstWroteOffset = 0;
+                for (long pos : dledgerFuture.getPositions()) {
+                    wroteOffset = pos + DLedgerEntry.BODY_OFFSET;
+                    if (isFirstOffset) {
+                        firstWroteOffset = wroteOffset;
+                        isFirstOffset = false;
+                    }
+                    String msgId = MessageDecoder.createMessageId(buffer, messageExtBatch.getStoreHostBytes(), wroteOffset);
+                    if (msgIdBuilder.length() > 0) {
+                        msgIdBuilder.append(',').append(msgId);
+                    } else {
+                        msgIdBuilder.append(msgId);
+                    }
+                    msgNum++;
+                }
+
+                elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginTimeInDledgerLock;
+                appendResult = new AppendMessageResult(AppendMessageStatus.PUT_OK, firstWroteOffset, encodeResult.totalMsgLen,
                     msgIdBuilder.toString(), System.currentTimeMillis(), queueOffset, elapsedTimeInLock);
-            appendResult.setMsgNum(msgNum);
-            DLedgerCommitLog.this.topicQueueTable.put(encodeResult.queueOffsetKey, queueOffset + msgNum);
+                appendResult.setMsgNum(msgNum);
+            } finally {
+                beginTimeInDledgerLock = 0;
+                putMessageLock.unlock();
+            }
+
+            if (elapsedTimeInLock > 500) {
+                log.warn("[NOTIFYME]putMessage in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}",
+                    elapsedTimeInLock, messageExtBatch.getBody().length, appendResult);
+            }
+
+            defaultMessageStore.increaseOffset(messageExtBatch, (short) batchNum);
+
         } catch (Exception e) {
             log.error("Put message error", e);
             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
-        } finally {
-            beginTimeInDledgerLock = 0;
-            putMessageLock.unlock();
-        }
-
-        if (elapsedTimeInLock > 500) {
-            log.warn("[NOTIFYME]putMessage in lock cost time(ms)={}, bodyLength={} AppendMessageResult={}",
-                    elapsedTimeInLock, messageExtBatch.getBody().length, appendResult);
+        }  finally {
+            topicQueueLock.unlock(encodeResult.queueOffsetKey);
         }
 
         return dledgerFuture.thenApply(appendEntryResponse -> {
@@ -619,17 +773,17 @@ public class DLedgerCommitLog extends CommitLog {
                     putMessageStatus = PutMessageStatus.SERVICE_NOT_AVAILABLE;
                     break;
                 case WAIT_QUORUM_ACK_TIMEOUT:
-                    //Do not return flush_slave_timeout to the client, for the ons client will ignore it.
-                    putMessageStatus = PutMessageStatus.OS_PAGECACHE_BUSY;
+                    //Do not return flush_slave_timeout to the client, for the client will ignore it.
+                    putMessageStatus = PutMessageStatus.IN_SYNC_REPLICAS_NOT_ENOUGH;
                     break;
                 case LEADER_PENDING_FULL:
-                    putMessageStatus = PutMessageStatus.OS_PAGECACHE_BUSY;
+                    putMessageStatus = PutMessageStatus.OS_PAGE_CACHE_BUSY;
                     break;
             }
             PutMessageResult putMessageResult = new PutMessageResult(putMessageStatus, appendResult);
             if (putMessageStatus == PutMessageStatus.PUT_OK) {
                 // Statistics
-                storeStatsService.getSinglePutMessageTopicTimesTotal(messageExtBatch.getTopic()).add(1);
+                storeStatsService.getSinglePutMessageTopicTimesTotal(messageExtBatch.getTopic()).add(appendResult.getMsgNum());
                 storeStatsService.getSinglePutMessageTopicSizeTotal(messageExtBatch.getTopic()).add(appendResult.getWroteBytes());
             }
             return putMessageResult;
@@ -654,16 +808,6 @@ public class DLedgerCommitLog extends CommitLog {
     public long rollNextFile(final long offset) {
         int mappedFileSize = this.defaultMessageStore.getMessageStoreConfig().getMappedFileSizeCommitLog();
         return offset + mappedFileSize - offset % mappedFileSize;
-    }
-
-    @Override
-    public HashMap<String, Long> getTopicQueueTable() {
-        return topicQueueTable;
-    }
-
-    @Override
-    public void setTopicQueueTable(HashMap<String, Long> topicQueueTable) {
-        this.topicQueueTable = topicQueueTable;
     }
 
     @Override
@@ -698,12 +842,8 @@ public class DLedgerCommitLog extends CommitLog {
         return diff;
     }
 
-    private long getQueueOffsetByKey(String key, int tranType) {
-        Long queueOffset = DLedgerCommitLog.this.topicQueueTable.get(key);
-        if (null == queueOffset) {
-            queueOffset = 0L;
-            DLedgerCommitLog.this.topicQueueTable.put(key, queueOffset);
-        }
+    private long getQueueOffsetByKey(MessageExtBrokerInner msg, int tranType) {
+        Long queueOffset = msg.getQueueOffset();
 
         // Transaction messages that require special handling
         switch (tranType) {
@@ -720,7 +860,6 @@ public class DLedgerCommitLog extends CommitLog {
         }
         return queueOffset;
     }
-
 
     class EncodeResult {
         private String queueOffsetKey;
@@ -750,7 +889,8 @@ public class DLedgerCommitLog extends CommitLog {
             return data.array();
         }
 
-        public EncodeResult(AppendMessageStatus status, String queueOffsetKey, List<byte[]> batchData, int totalMsgLen) {
+        public EncodeResult(AppendMessageStatus status, String queueOffsetKey, List<byte[]> batchData,
+            int totalMsgLen) {
             this.batchData = batchData;
             this.status = status;
             this.queueOffsetKey = queueOffsetKey;
@@ -760,11 +900,11 @@ public class DLedgerCommitLog extends CommitLog {
 
     class MessageSerializer {
 
-        // The maximum length of the message
-        private final int maxMessageSize;
+        // The maximum length of the message body
+        private final int maxMessageBodySize;
 
         MessageSerializer(final int size) {
-            this.maxMessageSize = size;
+            this.maxMessageBodySize = size;
         }
 
         public EncodeResult serialize(final MessageExtBrokerInner msgInner) {
@@ -802,14 +942,14 @@ public class DLedgerCommitLog extends CommitLog {
 
             final int bodyLength = msgInner.getBody() == null ? 0 : msgInner.getBody().length;
 
-            final int msgLen = calMsgLength(msgInner.getSysFlag(), bodyLength, topicLength, propertiesLength);
+            final int msgLen = MessageExtEncoder.calMsgLength(msgInner.getVersion(), msgInner.getSysFlag(), bodyLength, topicLength, propertiesLength);
 
             ByteBuffer msgStoreItemMemory = ByteBuffer.allocate(msgLen);
 
             // Exceeds the maximum message
-            if (msgLen > this.maxMessageSize) {
-                DLedgerCommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLength
-                    + ", maxMessageSize: " + this.maxMessageSize);
+            if (bodyLength > this.maxMessageBodySize) {
+                DLedgerCommitLog.log.warn("message body size exceeded, msg total size: " + msgLen + ", msg body size: " + bodyLength
+                    + ", maxMessageBodySize: " + this.maxMessageBodySize);
                 return new EncodeResult(AppendMessageStatus.MESSAGE_SIZE_EXCEEDED, null, key);
             }
             // Initialization of storage space
@@ -817,7 +957,7 @@ public class DLedgerCommitLog extends CommitLog {
             // 1 TOTALSIZE
             msgStoreItemMemory.putInt(msgLen);
             // 2 MAGICCODE
-            msgStoreItemMemory.putInt(DLedgerCommitLog.MESSAGE_MAGIC_CODE);
+            msgStoreItemMemory.putInt(msgInner.getVersion().getMagicCode());
             // 3 BODYCRC
             msgStoreItemMemory.putInt(msgInner.getBodyCRC());
             // 4 QUEUEID
@@ -851,7 +991,7 @@ public class DLedgerCommitLog extends CommitLog {
                 msgStoreItemMemory.put(msgInner.getBody());
             }
             // 16 TOPIC
-            msgStoreItemMemory.put((byte) topicLength);
+            msgInner.getVersion().putTopicLength(msgStoreItemMemory, topicLength);
             msgStoreItemMemory.put(topicData);
             // 17 PROPERTIES
             msgStoreItemMemory.putShort((short) propertiesLength);
@@ -866,6 +1006,14 @@ public class DLedgerCommitLog extends CommitLog {
 
             int totalMsgLen = 0;
             ByteBuffer messagesByteBuff = messageExtBatch.wrap();
+
+            int totalLength = messagesByteBuff.limit();
+            if (totalLength > this.maxMessageBodySize) {
+                CommitLog.log.warn("message body size exceeded, msg body size: " + totalLength
+                    + ", maxMessageBodySize: " + this.maxMessageBodySize);
+                throw new RuntimeException("message size exceeded");
+            }
+
             List<byte[]> batchBody = new LinkedList<>();
 
             int sysFlag = messageExtBatch.getSysFlag();
@@ -897,29 +1045,17 @@ public class DLedgerCommitLog extends CommitLog {
 
                 final int topicLength = topicData.length;
 
-                final int msgLen = calMsgLength(messageExtBatch.getSysFlag(), bodyLen, topicLength, propertiesLen);
+                final int msgLen = MessageExtEncoder.calMsgLength(messageExtBatch.getVersion(), messageExtBatch.getSysFlag(), bodyLen, topicLength, propertiesLen);
                 ByteBuffer msgStoreItemMemory = ByteBuffer.allocate(msgLen);
 
-                // Exceeds the maximum message
-                if (msgLen > this.maxMessageSize) {
-                    CommitLog.log.warn("message size exceeded, msg total size: " + msgLen + ", msg body size: " +
-                            bodyLen
-                            + ", maxMessageSize: " + this.maxMessageSize);
-                    throw new RuntimeException("message size exceeded");
-                }
-
                 totalMsgLen += msgLen;
-                // Determines whether there is sufficient free space
-                if (totalMsgLen > maxMessageSize) {
-                    throw new RuntimeException("message size exceeded");
-                }
 
                 // Initialization of storage space
                 this.resetByteBuffer(msgStoreItemMemory, msgLen);
                 // 1 TOTALSIZE
                 msgStoreItemMemory.putInt(msgLen);
                 // 2 MAGICCODE
-                msgStoreItemMemory.putInt(DLedgerCommitLog.MESSAGE_MAGIC_CODE);
+                msgStoreItemMemory.putInt(messageExtBatch.getVersion().getMagicCode());
                 // 3 BODYCRC
                 msgStoreItemMemory.putInt(bodyCrc);
                 // 4 QUEUEID
@@ -952,7 +1088,7 @@ public class DLedgerCommitLog extends CommitLog {
                     msgStoreItemMemory.put(messagesByteBuff.array(), bodyPos, bodyLen);
                 }
                 // 16 TOPIC
-                msgStoreItemMemory.put((byte) topicLength);
+                messageExtBatch.getVersion().putTopicLength(msgStoreItemMemory, topicLength);
                 msgStoreItemMemory.put(topicData);
                 // 17 PROPERTIES
                 msgStoreItemMemory.putShort(propertiesLen);

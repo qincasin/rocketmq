@@ -54,6 +54,13 @@ public class AppendMessageResult {
         this.pagecacheRT = pagecacheRT;
     }
 
+    public AppendMessageResult(AppendMessageStatus status, long wroteOffset, int wroteBytes, long storeTimestamp) {
+        this.status = status;
+        this.wroteOffset = wroteOffset;
+        this.wroteBytes = wroteBytes;
+        this.storeTimestamp = storeTimestamp;
+    }
+
     public AppendMessageResult(AppendMessageStatus status, long wroteOffset, int wroteBytes, Supplier<String> msgIdSupplier,
             long storeTimestamp, long logicsOffset, long pagecacheRT) {
         this.status = status;
@@ -63,6 +70,18 @@ public class AppendMessageResult {
         this.storeTimestamp = storeTimestamp;
         this.logicsOffset = logicsOffset;
         this.pagecacheRT = pagecacheRT;
+    }
+
+    public AppendMessageResult(AppendMessageStatus status, long wroteOffset, int wroteBytes, Supplier<String> msgIdSupplier,
+            long storeTimestamp, long logicsOffset, long pagecacheRT, int msgNum) {
+        this.status = status;
+        this.wroteOffset = wroteOffset;
+        this.wroteBytes = wroteBytes;
+        this.msgIdSupplier = msgIdSupplier;
+        this.storeTimestamp = storeTimestamp;
+        this.logicsOffset = logicsOffset;
+        this.pagecacheRT = pagecacheRT;
+        this.msgNum = msgNum;
     }
 
     public long getPagecacheRT() {

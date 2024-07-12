@@ -33,8 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.client.Validators;
 import org.apache.rocketmq.client.consumer.DefaultLitePullConsumer;
 import org.apache.rocketmq.client.consumer.MessageQueueListener;
@@ -54,35 +54,37 @@ import org.apache.rocketmq.client.hook.FilterMessageHook;
 import org.apache.rocketmq.client.impl.CommunicationMode;
 import org.apache.rocketmq.client.impl.MQClientManager;
 import org.apache.rocketmq.client.impl.factory.MQClientInstance;
-import org.apache.rocketmq.client.log.ClientLogger;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.ServiceState;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.filter.ExpressionType;
-import org.apache.rocketmq.common.filter.FilterAPI;
 import org.apache.rocketmq.common.help.FAQUrl;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
-import org.apache.rocketmq.common.protocol.NamespaceUtil;
-import org.apache.rocketmq.common.protocol.body.ConsumerRunningInfo;
-import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
-import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
-import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.common.sysflag.PullSysFlag;
-import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.remoting.RPCHook;
 import org.apache.rocketmq.remoting.exception.RemotingException;
+import org.apache.rocketmq.remoting.protocol.NamespaceUtil;
+import org.apache.rocketmq.remoting.protocol.ResponseCode;
+import org.apache.rocketmq.remoting.protocol.body.ConsumerRunningInfo;
+import org.apache.rocketmq.remoting.protocol.body.ProcessQueueInfo;
+import org.apache.rocketmq.remoting.protocol.filter.FilterAPI;
+import org.apache.rocketmq.remoting.protocol.heartbeat.ConsumeType;
+import org.apache.rocketmq.remoting.protocol.heartbeat.MessageModel;
+import org.apache.rocketmq.remoting.protocol.heartbeat.SubscriptionData;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 
 public class DefaultLitePullConsumerImpl implements MQConsumerInner {
 
-    private final InternalLogger log = ClientLogger.getLog();
+    private static final Logger log = LoggerFactory.getLogger(DefaultLitePullConsumerImpl.class);
 
     private final long consumerStartTimestamp = System.currentTimeMillis();
 
     private final RPCHook rpcHook;
 
-    private final ArrayList<FilterMessageHook> filterMessageHookList = new ArrayList<FilterMessageHook>();
+    private final ArrayList<FilterMessageHook> filterMessageHookList = new ArrayList<>();
 
     private volatile ServiceState serviceState = ServiceState.CREATE_JUST;
 
@@ -110,9 +112,13 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
      */
     private long pullTimeDelayMillsWhenException = 1000;
     /**
-     * Flow control interval
+     * Flow control interval when message cache is full
      */
-    private static final long PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL = 50;
+    private static final long PULL_TIME_DELAY_MILLS_WHEN_CACHE_FLOW_CONTROL = 50;
+    /**
+     * Flow control interval when broker return flow control
+     */
+    private static final long PULL_TIME_DELAY_MILLS_WHEN_BROKER_FLOW_CONTROL = 20;
     /**
      * Delay some time when suspend pull service
      */
@@ -120,22 +126,24 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
 
     private static final long PULL_TIME_DELAY_MILLS_ON_EXCEPTION = 3 * 1000;
 
+    private ConcurrentHashMap<String/* topic */, String/* subExpression */> topicToSubExpression = new ConcurrentHashMap<>();
+
     private DefaultLitePullConsumer defaultLitePullConsumer;
 
     private final ConcurrentMap<MessageQueue, PullTaskImpl> taskTable =
-        new ConcurrentHashMap<MessageQueue, PullTaskImpl>();
+        new ConcurrentHashMap<>();
 
     private AssignedMessageQueue assignedMessageQueue = new AssignedMessageQueue();
 
-    private final BlockingQueue<ConsumeRequest> consumeRequestCache = new LinkedBlockingQueue<ConsumeRequest>();
+    private final BlockingQueue<ConsumeRequest> consumeRequestCache = new LinkedBlockingQueue<>();
 
     private ScheduledThreadPoolExecutor scheduledThreadPoolExecutor;
 
     private final ScheduledExecutorService scheduledExecutorService;
 
-    private Map<String, TopicMessageQueueChangeListener> topicMessageQueueChangeListenerMap = new HashMap<String, TopicMessageQueueChangeListener>();
+    private Map<String, TopicMessageQueueChangeListener> topicMessageQueueChangeListenerMap = new HashMap<>();
 
-    private Map<String, Set<MessageQueue>> messageQueuesForTopic = new HashMap<String, Set<MessageQueue>>();
+    private Map<String, Set<MessageQueue>> messageQueuesForTopic = new HashMap<>();
 
     private long consumeRequestFlowControlTimes = 0L;
 
@@ -149,6 +157,10 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
 
     private final ArrayList<ConsumeMessageHook> consumeMessageHookList = new ArrayList<>();
 
+    // only for test purpose, will be modified by reflection in unit test.
+    @SuppressWarnings("FieldMayBeFinal")
+    private static boolean doNotUpdateTopicSubscribeInfoWhenSubscriptionChanged = false;
+
     public DefaultLitePullConsumerImpl(final DefaultLitePullConsumer defaultLitePullConsumer, final RPCHook rpcHook) {
         this.defaultLitePullConsumer = defaultLitePullConsumer;
         this.rpcHook = rpcHook;
@@ -156,12 +168,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
             this.defaultLitePullConsumer.getPullThreadNums(),
             new ThreadFactoryImpl("PullMsgThread-" + this.defaultLitePullConsumer.getConsumerGroup())
         );
-        this.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                return new Thread(r, "MonitorMessageQueueChangeThread");
-            }
-        });
+        this.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactoryImpl("MonitorMessageQueueChangeThread"));
         this.pullTimeDelayMillsWhenException = defaultLitePullConsumer.getPullTimeDelayMillsWhenException();
     }
 
@@ -233,19 +240,23 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     class MessageQueueListenerImpl implements MessageQueueListener {
         @Override
         public void messageQueueChanged(String topic, Set<MessageQueue> mqAll, Set<MessageQueue> mqDivided) {
-            MessageModel messageModel = defaultLitePullConsumer.getMessageModel();
-            switch (messageModel) {
-                case BROADCASTING:
-                    updateAssignedMessageQueue(topic, mqAll);
-                    updatePullTask(topic, mqAll);
-                    break;
-                case CLUSTERING:
-                    updateAssignedMessageQueue(topic, mqDivided);
-                    updatePullTask(topic, mqDivided);
-                    break;
-                default:
-                    break;
-            }
+            updateAssignQueueAndStartPullTask(topic, mqAll, mqDivided);
+        }
+    }
+
+    public void updateAssignQueueAndStartPullTask(String topic, Set<MessageQueue> mqAll, Set<MessageQueue> mqDivided) {
+        MessageModel messageModel = defaultLitePullConsumer.getMessageModel();
+        switch (messageModel) {
+            case BROADCASTING:
+                updateAssignedMessageQueue(topic, mqAll);
+                updatePullTask(topic, mqAll);
+                break;
+            case CLUSTERING:
+                updateAssignedMessageQueue(topic, mqDivided);
+                updatePullTask(topic, mqDivided);
+                break;
+            default:
+                break;
         }
     }
 
@@ -379,7 +390,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
         }
         // If assign function invoke before start function, then update pull task after initialization.
         if (subscriptionType == SubscriptionType.ASSIGN) {
-            updateAssignPullTask(assignedMessageQueue.messageQueues());
+            updateAssignPullTask(assignedMessageQueue.getAssignedMessageQueues());
         }
 
         for (String topic : topicMessageQueueChangeListenerMap.keySet()) {
@@ -455,12 +466,51 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     }
 
     private void updateTopicSubscribeInfoWhenSubscriptionChanged() {
+        if (doNotUpdateTopicSubscribeInfoWhenSubscriptionChanged) {
+            return;
+        }
         Map<String, SubscriptionData> subTable = rebalanceImpl.getSubscriptionInner();
         if (subTable != null) {
             for (final Map.Entry<String, SubscriptionData> entry : subTable.entrySet()) {
                 final String topic = entry.getKey();
                 this.mQClientFactory.updateTopicRouteInfoFromNameServer(topic);
             }
+        }
+    }
+
+    /**
+     * subscribe data by customizing messageQueueListener
+     *
+     * @param topic
+     * @param subExpression
+     * @param messageQueueListener
+     * @throws MQClientException
+     */
+    public synchronized void subscribe(String topic, String subExpression,
+        MessageQueueListener messageQueueListener) throws MQClientException {
+        try {
+            if (StringUtils.isEmpty(topic)) {
+                throw new IllegalArgumentException("Topic can not be null or empty.");
+            }
+            setSubscriptionType(SubscriptionType.SUBSCRIBE);
+            SubscriptionData subscriptionData = FilterAPI.buildSubscriptionData(topic, subExpression);
+            this.rebalanceImpl.getSubscriptionInner().put(topic, subscriptionData);
+            this.defaultLitePullConsumer.setMessageQueueListener(new MessageQueueListener() {
+                @Override
+                public void messageQueueChanged(String topic, Set<MessageQueue> mqAll, Set<MessageQueue> mqDivided) {
+                    // First, update the assign queue
+                    updateAssignQueueAndStartPullTask(topic, mqAll, mqDivided);
+                    // run custom listener
+                    messageQueueListener.messageQueueChanged(topic, mqAll, mqDivided);
+                }
+            });
+            assignedMessageQueue.setRebalanceImpl(this.rebalanceImpl);
+            if (serviceState == ServiceState.RUNNING) {
+                this.mQClientFactory.sendHeartbeatToAllBrokerWithLock();
+                updateTopicSubscribeInfoWhenSubscriptionChanged();
+            }
+        } catch (Exception e) {
+            throw new MQClientException("subscribe exception", e);
         }
     }
 
@@ -524,6 +574,17 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
         }
     }
 
+    public synchronized void setSubExpressionForAssign(final String topic, final String subExpression) {
+        if (StringUtils.isBlank(subExpression)) {
+            throw new IllegalArgumentException("subExpression can not be null or empty.");
+        }
+        if (serviceState != ServiceState.CREATE_JUST) {
+            throw new IllegalStateException("setAssignTag only can be called before start.");
+        }
+        setSubscriptionType(SubscriptionType.ASSIGN);
+        topicToSubExpression.put(topic, subExpression);
+    }
+
     private void maybeAutoCommit() {
         long now = System.currentTimeMillis();
         if (now >= nextAutoCommitDeadline) {
@@ -561,6 +622,20 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                 assignedMessageQueue.updateConsumeOffset(consumeRequest.getMessageQueue(), offset);
                 //If namespace not null , reset Topic without namespace.
                 this.resetTopic(messages);
+                if (!this.consumeMessageHookList.isEmpty()) {
+                    ConsumeMessageContext consumeMessageContext = new ConsumeMessageContext();
+                    consumeMessageContext.setNamespace(defaultLitePullConsumer.getNamespace());
+                    consumeMessageContext.setConsumerGroup(this.groupName());
+                    consumeMessageContext.setMq(consumeRequest.getMessageQueue());
+                    consumeMessageContext.setMsgList(messages);
+                    consumeMessageContext.setSuccess(false);
+                    this.executeHookBefore(consumeMessageContext);
+                    consumeMessageContext.setStatus(ConsumeConcurrentlyStatus.CONSUME_SUCCESS.toString());
+                    consumeMessageContext.setSuccess(true);
+                    consumeMessageContext.setAccessChannel(defaultLitePullConsumer.getAccessChannel());
+                    this.executeHookAfter(consumeMessageContext);
+                }
+                consumeRequest.getProcessQueue().setLastConsumeTimestamp(System.currentTimeMillis());
                 return messages;
             }
         } catch (InterruptedException ignore) {
@@ -579,7 +654,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     }
 
     public synchronized void seek(MessageQueue messageQueue, long offset) throws MQClientException {
-        if (!assignedMessageQueue.messageQueues().contains(messageQueue)) {
+        if (!assignedMessageQueue.getAssignedMessageQueues().contains(messageQueue)) {
             if (subscriptionType == SubscriptionType.SUBSCRIBE) {
                 throw new MQClientException("The message queue is not in assigned list, may be rebalancing, message queue: " + messageQueue, null);
             } else {
@@ -645,21 +720,77 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     }
 
     public synchronized void commitAll() {
-        try {
-            for (MessageQueue messageQueue : assignedMessageQueue.messageQueues()) {
-                long consumerOffset = assignedMessageQueue.getConsumerOffset(messageQueue);
-                if (consumerOffset != -1) {
-                    ProcessQueue processQueue = assignedMessageQueue.getProcessQueue(messageQueue);
-                    if (processQueue != null && !processQueue.isDropped()) {
-                        updateConsumeOffset(messageQueue, consumerOffset);
-                    }
+        for (MessageQueue messageQueue : assignedMessageQueue.getAssignedMessageQueues()) {
+            try {
+                commit(messageQueue);
+            } catch (Exception e) {
+                log.error("An error occurred when update consume offset Automatically.");
+            }
+        }
+    }
+
+    /**
+     * Specify offset commit
+     *
+     * @param messageQueues
+     * @param persist
+     */
+    public synchronized void commit(final Map<MessageQueue, Long> messageQueues, boolean persist) {
+        if (messageQueues == null || messageQueues.size() == 0) {
+            log.warn("MessageQueues is empty, Ignore this commit ");
+            return;
+        }
+        for (Map.Entry<MessageQueue, Long> messageQueueEntry : messageQueues.entrySet()) {
+            MessageQueue messageQueue = messageQueueEntry.getKey();
+            long offset = messageQueueEntry.getValue();
+            if (offset != -1) {
+                ProcessQueue processQueue = assignedMessageQueue.getProcessQueue(messageQueue);
+                if (processQueue != null && !processQueue.isDropped()) {
+                    updateConsumeOffset(messageQueue, offset);
                 }
+            } else {
+                log.error("consumerOffset is -1 in messageQueue [" + messageQueue + "].");
             }
-            if (defaultLitePullConsumer.getMessageModel() == MessageModel.BROADCASTING) {
-                offsetStore.persistAll(assignedMessageQueue.messageQueues());
+        }
+
+        if (persist) {
+            this.offsetStore.persistAll(messageQueues.keySet());
+        }
+    }
+
+    /**
+     * Get the queue assigned in subscribe mode
+     *
+     * @return
+     */
+    public synchronized Set<MessageQueue> assignment() {
+        return assignedMessageQueue.getAssignedMessageQueues();
+    }
+
+    public synchronized void commit(final Set<MessageQueue> messageQueues, boolean persist) {
+        if (messageQueues == null || messageQueues.size() == 0) {
+            return;
+        }
+
+        for (MessageQueue messageQueue : messageQueues) {
+            commit(messageQueue);
+        }
+
+        if (persist) {
+            this.offsetStore.persistAll(messageQueues);
+        }
+    }
+
+    private synchronized void commit(MessageQueue messageQueue) {
+        long consumerOffset = assignedMessageQueue.getConsumerOffset(messageQueue);
+
+        if (consumerOffset != -1) {
+            ProcessQueue processQueue = assignedMessageQueue.getProcessQueue(messageQueue);
+            if (processQueue != null && !processQueue.isDropped()) {
+                updateConsumeOffset(messageQueue, consumerOffset);
             }
-        } catch (Exception e) {
-            log.error("An error occurred when update consume offset Automatically.");
+        } else {
+            log.error("consumerOffset is -1 in messageQueue [" + messageQueue + "].");
         }
     }
 
@@ -765,8 +896,10 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                     return;
                 }
 
+                processQueue.setLastPullTimestamp(System.currentTimeMillis());
+
                 if ((long) consumeRequestCache.size() * defaultLitePullConsumer.getPullBatchSize() > defaultLitePullConsumer.getPullThresholdForAll()) {
-                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL, TimeUnit.MILLISECONDS);
+                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_CACHE_FLOW_CONTROL, TimeUnit.MILLISECONDS);
                     if ((consumeRequestFlowControlTimes++ % 1000) == 0) {
                         log.warn("The consume request count exceeds threshold {}, so do flow control, consume request count={}, flowControlTimes={}", consumeRequestCache.size(), consumeRequestFlowControlTimes);
                     }
@@ -777,7 +910,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                 long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);
 
                 if (cachedMessageCount > defaultLitePullConsumer.getPullThresholdForQueue()) {
-                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL, TimeUnit.MILLISECONDS);
+                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_CACHE_FLOW_CONTROL, TimeUnit.MILLISECONDS);
                     if ((queueFlowControlTimes++ % 1000) == 0) {
                         log.warn(
                             "The cached message count exceeds the threshold {}, so do flow control, minOffset={}, maxOffset={}, count={}, size={} MiB, flowControlTimes={}",
@@ -787,7 +920,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                 }
 
                 if (cachedMessageSizeInMiB > defaultLitePullConsumer.getPullThresholdSizeForQueue()) {
-                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL, TimeUnit.MILLISECONDS);
+                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_CACHE_FLOW_CONTROL, TimeUnit.MILLISECONDS);
                     if ((queueFlowControlTimes++ % 1000) == 0) {
                         log.warn(
                             "The cached message size exceeds the threshold {} MiB, so do flow control, minOffset={}, maxOffset={}, count={}, size={} MiB, flowControlTimes={}",
@@ -797,7 +930,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                 }
 
                 if (processQueue.getMaxSpan() > defaultLitePullConsumer.getConsumeMaxSpan()) {
-                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL, TimeUnit.MILLISECONDS);
+                    scheduledThreadPoolExecutor.schedule(this, PULL_TIME_DELAY_MILLS_WHEN_CACHE_FLOW_CONTROL, TimeUnit.MILLISECONDS);
                     if ((queueMaxSpanFlowControlTimes++ % 1000) == 0) {
                         log.warn(
                             "The queue's messages, span too long, so do flow control, minOffset={}, maxOffset={}, maxSpan={}, flowControlTimes={}",
@@ -825,7 +958,9 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                     if (subscriptionType == SubscriptionType.SUBSCRIBE) {
                         subscriptionData = rebalanceImpl.getSubscriptionInner().get(topic);
                     } else {
-                        subscriptionData = FilterAPI.buildSubscriptionData(topic, SubscriptionData.SUB_ALL);
+                        String subExpression4Assign = topicToSubExpression.get(topic);
+                        subExpression4Assign = subExpression4Assign == null ? SubscriptionData.SUB_ALL : subExpression4Assign;
+                        subscriptionData = FilterAPI.buildSubscriptionData(topic, subExpression4Assign);
                     }
 
                     PullResult pullResult = pull(messageQueue, subscriptionData, offset, defaultLitePullConsumer.getPullBatchSize());
@@ -849,8 +984,14 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
                             break;
                     }
                     updatePullOffset(messageQueue, pullResult.getNextBeginOffset(), processQueue);
+                } catch (InterruptedException interruptedException) {
+                    log.warn("Polling thread was interrupted.", interruptedException);
                 } catch (Throwable e) {
-                    pullDelayTimeMills = pullTimeDelayMillsWhenException;
+                    if (e instanceof MQBrokerException && ((MQBrokerException) e).getResponseCode() == ResponseCode.FLOW_CONTROL) {
+                        pullDelayTimeMills = PULL_TIME_DELAY_MILLS_WHEN_BROKER_FLOW_CONTROL;
+                    } else {
+                        pullDelayTimeMills = pullTimeDelayMillsWhenException;
+                    }
                     log.error("An error occurred in pull message process.", e);
                 }
 
@@ -922,18 +1063,6 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
             null
         );
         this.pullAPIWrapper.processPullResult(mq, pullResult, subscriptionData);
-        if (!this.consumeMessageHookList.isEmpty()) {
-            ConsumeMessageContext consumeMessageContext = new ConsumeMessageContext();
-            consumeMessageContext.setNamespace(defaultLitePullConsumer.getNamespace());
-            consumeMessageContext.setConsumerGroup(this.groupName());
-            consumeMessageContext.setMq(mq);
-            consumeMessageContext.setMsgList(pullResult.getMsgFoundList());
-            consumeMessageContext.setSuccess(false);
-            this.executeHookBefore(consumeMessageContext);
-            consumeMessageContext.setStatus(ConsumeConcurrentlyStatus.CONSUME_SUCCESS.toString());
-            consumeMessageContext.setSuccess(true);
-            this.executeHookAfter(consumeMessageContext);
-        }
         return pullResult;
     }
 
@@ -978,7 +1107,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
 
     @Override
     public Set<SubscriptionData> subscriptions() {
-        Set<SubscriptionData> subSet = new HashSet<SubscriptionData>();
+        Set<SubscriptionData> subSet = new HashSet<>();
 
         subSet.addAll(this.rebalanceImpl.getSubscriptionInner().values());
 
@@ -993,10 +1122,18 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     }
 
     @Override
+    public boolean tryRebalance() {
+        if (this.rebalanceImpl != null) {
+            return this.rebalanceImpl.doRebalance(false);
+        }
+        return false;
+    }
+
+    @Override
     public void persistConsumerOffset() {
         try {
             checkServiceState();
-            Set<MessageQueue> mqs = new HashSet<MessageQueue>();
+            Set<MessageQueue> mqs = new HashSet<>();
             if (this.subscriptionType == SubscriptionType.SUBSCRIBE) {
                 Set<MessageQueue> allocateMq = this.rebalanceImpl.getProcessQueueTable().keySet();
                 mqs.addAll(allocateMq);
@@ -1046,6 +1183,15 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
         info.setProperties(prop);
 
         info.getSubscriptionSet().addAll(this.subscriptions());
+
+        for (MessageQueue mq : this.assignedMessageQueue.getAssignedMessageQueues()) {
+            ProcessQueue pq = this.assignedMessageQueue.getProcessQueue(mq);
+            ProcessQueueInfo pqInfo = new ProcessQueueInfo();
+            pqInfo.setCommitOffset(this.offsetStore.readOffset(mq, ReadOffsetType.MEMORY_FIRST_THEN_STORE));
+            pq.fillProcessQueueInfo(pqInfo);
+            info.getMqTable().put(mq, pqInfo);
+        }
+
         return info;
     }
 
@@ -1089,12 +1235,11 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
             return true;
         }
 
-        if (set1 == null || set2 == null || set1.size() != set2.size()
-            || set1.size() == 0 || set2.size() == 0) {
+        if (set1 == null || set2 == null || set1.size() != set2.size() || set1.size() == 0) {
             return false;
         }
 
-        Iterator iter = set2.iterator();
+        Iterator<MessageQueue> iter = set2.iterator();
         boolean isEqual = true;
         while (iter.hasNext()) {
             if (!set1.contains(iter.next())) {
@@ -1102,6 +1247,10 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
             }
         }
         return isEqual;
+    }
+
+    public AssignedMessageQueue getAssignedMessageQueue() {
+        return assignedMessageQueue;
     }
 
     public synchronized void registerTopicMessageQueueChangeListener(String topic,
@@ -1120,7 +1269,7 @@ public class DefaultLitePullConsumerImpl implements MQConsumerInner {
     }
 
     private Set<MessageQueue> parseMessageQueues(Set<MessageQueue> queueSet) {
-        Set<MessageQueue> resultQueues = new HashSet<MessageQueue>();
+        Set<MessageQueue> resultQueues = new HashSet<>();
         for (MessageQueue messageQueue : queueSet) {
             String userTopic = NamespaceUtil.withoutNamespace(messageQueue.getTopic(),
                 this.defaultLitePullConsumer.getNamespace());

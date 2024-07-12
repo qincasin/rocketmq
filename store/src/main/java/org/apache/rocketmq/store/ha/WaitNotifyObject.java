@@ -17,18 +17,19 @@
 package org.apache.rocketmq.store.ha;
 
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.common.utils.ConcurrentHashMapUtils;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class WaitNotifyObject {
-    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
     protected final ConcurrentHashMap<Long/* thread id */, AtomicBoolean/* notified */> waitingThreadTable =
-        new ConcurrentHashMap<Long, AtomicBoolean>(16);
+        new ConcurrentHashMap<>(16);
 
     protected AtomicBoolean hasNotified = new AtomicBoolean(false);
 
@@ -67,7 +68,7 @@ public class WaitNotifyObject {
 
     public void wakeupAll() {
         boolean needNotify = false;
-        for (Map.Entry<Long,AtomicBoolean> entry : this.waitingThreadTable.entrySet()) {
+        for (Map.Entry<Long, AtomicBoolean> entry : this.waitingThreadTable.entrySet()) {
             if (entry.getValue().compareAndSet(false, true)) {
                 needNotify = true;
             }
@@ -81,7 +82,7 @@ public class WaitNotifyObject {
 
     public void allWaitForRunning(long interval) {
         long currentThreadId = Thread.currentThread().getId();
-        AtomicBoolean notified = this.waitingThreadTable.computeIfAbsent(currentThreadId, k -> new AtomicBoolean(false));
+        AtomicBoolean notified = ConcurrentHashMapUtils.computeIfAbsent(this.waitingThreadTable, currentThreadId, k -> new AtomicBoolean(false));
         if (notified.compareAndSet(true, false)) {
             this.onWaitEnd();
             return;

@@ -17,25 +17,6 @@
 
 package org.apache.rocketmq.example.benchmark;
 
-import java.util.concurrent.atomic.LongAdder;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.PosixParser;
-import org.apache.commons.lang3.concurrent.BasicThreadFactory;
-import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
-import org.apache.rocketmq.client.consumer.MessageSelector;
-import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
-import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
-import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
-import org.apache.rocketmq.client.consumer.rebalance.AllocateMessageQueueAveragely;
-import org.apache.rocketmq.client.exception.MQClientException;
-import org.apache.rocketmq.common.MixAll;
-import org.apache.rocketmq.common.filter.ExpressionType;
-import org.apache.rocketmq.common.message.MessageExt;
-import org.apache.rocketmq.remoting.RPCHook;
-import org.apache.rocketmq.srvutil.ServerUtil;
-
 import java.io.IOException;
 import java.util.LinkedList;
 import java.util.List;
@@ -45,12 +26,34 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
+import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.consumer.MessageSelector;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
+import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
+import org.apache.rocketmq.client.consumer.rebalance.AllocateMessageQueueAveragely;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.common.MixAll;
+import org.apache.rocketmq.common.UtilAll;
+import org.apache.rocketmq.common.filter.ExpressionType;
+import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.rocketmq.remoting.RPCHook;
+import org.apache.rocketmq.remoting.protocol.RemotingCommand;
+import org.apache.rocketmq.remoting.protocol.SerializeType;
+import org.apache.rocketmq.srvutil.ServerUtil;
 
 public class Consumer {
 
     public static void main(String[] args) throws MQClientException, IOException {
+        System.setProperty(RemotingCommand.SERIALIZE_TYPE_PROPERTY, SerializeType.ROCKETMQ.name());
         Options options = ServerUtil.buildCommandlineOptions(new Options());
-        CommandLine commandLine = ServerUtil.parseCmdLine("benchmarkConsumer", args, buildCommandlineOptions(options), new PosixParser());
+        CommandLine commandLine = ServerUtil.parseCmdLine("benchmarkConsumer", args, buildCommandlineOptions(options), new DefaultParser());
         if (null == commandLine) {
             System.exit(-1);
         }
@@ -64,21 +67,23 @@ public class Consumer {
         final double failRate = commandLine.hasOption('r') ? Double.parseDouble(commandLine.getOptionValue('r').trim()) : 0.0;
         final boolean msgTraceEnable = commandLine.hasOption('m') && Boolean.parseBoolean(commandLine.getOptionValue('m'));
         final boolean aclEnable = commandLine.hasOption('a') && Boolean.parseBoolean(commandLine.getOptionValue('a'));
+        final boolean clientRebalanceEnable = commandLine.hasOption('c') ? Boolean.parseBoolean(commandLine.getOptionValue('c')) : true;
+        final int reportInterval = commandLine.hasOption("ri") ? Integer.parseInt(commandLine.getOptionValue("ri")) : 10000;
 
         String group = groupPrefix;
         if (Boolean.parseBoolean(isSuffixEnable)) {
             group = groupPrefix + "_" + (System.currentTimeMillis() % 100);
         }
 
-        System.out.printf("topic: %s, threadCount %d, group: %s, suffix: %s, filterType: %s, expression: %s, msgTraceEnable: %s, aclEnable: %s%n",
-            topic, threadCount, group, isSuffixEnable, filterType, expression, msgTraceEnable, aclEnable);
+        System.out.printf("topic: %s, threadCount %d, group: %s, suffix: %s, filterType: %s, expression: %s, msgTraceEnable: %s, aclEnable: %s, reportInterval: %d%n",
+            topic, threadCount, group, isSuffixEnable, filterType, expression, msgTraceEnable, aclEnable, reportInterval);
 
         final StatsBenchmarkConsumer statsBenchmarkConsumer = new StatsBenchmarkConsumer();
 
         ScheduledExecutorService executorService = new ScheduledThreadPoolExecutor(1,
-                new BasicThreadFactory.Builder().namingPattern("BenchmarkTimerThread-%d").daemon(true).build());
+            new BasicThreadFactory.Builder().namingPattern("BenchmarkTimerThread-%d").daemon(true).build());
 
-        final LinkedList<Long[]> snapshotList = new LinkedList<Long[]>();
+        final LinkedList<Long[]> snapshotList = new LinkedList<>();
 
         executorService.scheduleAtFixedRate(new TimerTask() {
             @Override
@@ -107,9 +112,8 @@ public class Consumer {
                     statsBenchmarkConsumer.getBorn2ConsumerMaxRT().set(0);
                     statsBenchmarkConsumer.getStore2ConsumerMaxRT().set(0);
 
-                    System.out.printf("Current Time: %s TPS: %d FAIL: %d AVG(B2C) RT(ms): %7.3f AVG(S2C) RT(ms): %7.3f MAX(B2C) RT(ms): %d MAX(S2C) RT(ms): %d%n",
-                            System.currentTimeMillis(), consumeTps, failCount, averageB2CRT, averageS2CRT, b2cMax, s2cMax
-                    );
+                    System.out.printf("Current Time: %s | Consume TPS: %d | AVG(B2C) RT(ms): %7.3f | AVG(S2C) RT(ms): %7.3f | MAX(B2C) RT(ms): %d | MAX(S2C) RT(ms): %d | Consume Fail: %d%n",
+                        UtilAll.timeMillisToHumanString2(System.currentTimeMillis()), consumeTps, averageB2CRT, averageS2CRT, b2cMax, s2cMax, failCount);
                 }
             }
 
@@ -121,9 +125,14 @@ public class Consumer {
                     e.printStackTrace();
                 }
             }
-        }, 10000, 10000, TimeUnit.MILLISECONDS);
+        }, reportInterval, reportInterval, TimeUnit.MILLISECONDS);
 
-        RPCHook rpcHook = aclEnable ? AclClient.getAclRPCHook() : null;
+        RPCHook rpcHook = null;
+        if (aclEnable) {
+            String ak = commandLine.hasOption("ak") ? String.valueOf(commandLine.getOptionValue("ak")) : AclClient.ACL_ACCESS_KEY;
+            String sk = commandLine.hasOption("sk") ? String.valueOf(commandLine.getOptionValue("sk")) : AclClient.ACL_SECRET_KEY;
+            rpcHook = AclClient.getAclRPCHook(ak, sk);
+        }
         DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(group, rpcHook, new AllocateMessageQueueAveragely(), msgTraceEnable, null);
         if (commandLine.hasOption('n')) {
             String ns = commandLine.getOptionValue('n');
@@ -132,6 +141,7 @@ public class Consumer {
         consumer.setConsumeThreadMin(threadCount);
         consumer.setConsumeThreadMax(threadCount);
         consumer.setInstanceName(Long.toString(System.currentTimeMillis()));
+        consumer.setClientRebalance(clientRebalanceEnable);
 
         if (filterType == null || expression == null) {
             consumer.subscribe(topic, "*");
@@ -215,6 +225,18 @@ public class Consumer {
         options.addOption(opt);
 
         opt = new Option("a", "aclEnable", true, "Acl Enable, Default: false");
+        opt.setRequired(false);
+        options.addOption(opt);
+
+        opt = new Option("ak", "accessKey", true, "Acl access key, Default: 12345678");
+        opt.setRequired(false);
+        options.addOption(opt);
+
+        opt = new Option("sk", "secretKey", true, "Acl secret key, Default: rocketmq2");
+        opt.setRequired(false);
+        options.addOption(opt);
+
+        opt = new Option("ri", "reportInterval", true, "The number of ms between reports, Default: 10000");
         opt.setRequired(false);
         options.addOption(opt);
 

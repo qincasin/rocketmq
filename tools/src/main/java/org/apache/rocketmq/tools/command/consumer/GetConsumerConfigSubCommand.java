@@ -20,14 +20,16 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.collections.CollectionUtils;
-import org.apache.rocketmq.common.protocol.body.ClusterInfo;
-import org.apache.rocketmq.common.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.remoting.RPCHook;
+import org.apache.rocketmq.remoting.protocol.body.ClusterInfo;
+import org.apache.rocketmq.remoting.protocol.route.BrokerData;
+import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.tools.admin.DefaultMQAdminExt;
 import org.apache.rocketmq.tools.command.SubCommand;
 import org.apache.rocketmq.tools.command.SubCommandException;
@@ -41,7 +43,7 @@ public class GetConsumerConfigSubCommand implements SubCommand {
 
     @Override
     public String commandDesc() {
-        return "Get consumer config by subscription group name!";
+        return "Get consumer config by subscription group name.";
     }
 
     @Override
@@ -58,19 +60,24 @@ public class GetConsumerConfigSubCommand implements SubCommand {
         DefaultMQAdminExt adminExt = new DefaultMQAdminExt(rpcHook);
         adminExt.setInstanceName(Long.toString(System.currentTimeMillis()));
         String groupName = commandLine.getOptionValue('g').trim();
+
+        if (commandLine.hasOption('n')) {
+            adminExt.setNamesrvAddr(commandLine.getOptionValue('n').trim());
+        }
+
         try {
             adminExt.start();
             List<ConsumerConfigInfo> consumerConfigInfoList = new ArrayList<>();
             ClusterInfo clusterInfo = adminExt.examineBrokerClusterInfo();
             Map<String, Set<String>> clusterAddrTable = clusterInfo.getClusterAddrTable();
-            for (String brokerName : clusterInfo.getBrokerAddrTable().keySet()) {
-                String clusterName = this.getClusterName(brokerName, clusterAddrTable);
-                String brokerAddress = clusterInfo.getBrokerAddrTable().get(brokerName).selectBrokerAddr();
+            for (Entry<String, BrokerData> brokerEntry : clusterInfo.getBrokerAddrTable().entrySet()) {
+                String clusterName = this.getClusterName(brokerEntry.getKey(), clusterAddrTable);
+                String brokerAddress = brokerEntry.getValue().selectBrokerAddr();
                 SubscriptionGroupConfig subscriptionGroupConfig = adminExt.examineSubscriptionGroupConfig(brokerAddress, groupName);
                 if (subscriptionGroupConfig == null) {
                     continue;
                 }
-                consumerConfigInfoList.add(new ConsumerConfigInfo(clusterName, brokerName, subscriptionGroupConfig));
+                consumerConfigInfoList.add(new ConsumerConfigInfo(clusterName, brokerEntry.getKey(), subscriptionGroupConfig));
             }
             if (CollectionUtils.isEmpty(consumerConfigInfoList)) {
                 return;
@@ -132,7 +139,7 @@ class ConsumerConfigInfo {
         return brokerName;
     }
 
-    public void setBrokerName(String brokerNameList) {
+    public void setBrokerName(String brokerName) {
         this.brokerName = brokerName;
     }
 

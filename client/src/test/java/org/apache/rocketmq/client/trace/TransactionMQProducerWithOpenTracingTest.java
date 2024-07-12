@@ -20,6 +20,11 @@ package org.apache.rocketmq.client.trace;
 import io.opentracing.mock.MockSpan;
 import io.opentracing.mock.MockTracer;
 import io.opentracing.tag.Tags;
+import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
@@ -43,12 +48,12 @@ import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.common.message.MessageType;
-import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
-import org.apache.rocketmq.common.protocol.route.BrokerData;
-import org.apache.rocketmq.common.protocol.route.QueueData;
-import org.apache.rocketmq.common.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.remoting.exception.RemotingException;
+import org.apache.rocketmq.remoting.protocol.header.SendMessageRequestHeader;
+import org.apache.rocketmq.remoting.protocol.route.BrokerData;
+import org.apache.rocketmq.remoting.protocol.route.QueueData;
+import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -56,12 +61,6 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
-
-import java.lang.reflect.Field;
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -118,7 +117,7 @@ public class TransactionMQProducerWithOpenTracingTest {
         field.setAccessible(true);
         field.set(mQClientFactory, mQClientAPIImpl);
 
-        producer.getDefaultMQProducerImpl().getmQClientFactory().registerProducer(producerGroupTemp, producer.getDefaultMQProducerImpl());
+        producer.getDefaultMQProducerImpl().getMqClientFactory().registerProducer(producerGroupTemp, producer.getDefaultMQProducerImpl());
 
         when(mQClientAPIImpl.sendMessage(anyString(), anyString(), any(Message.class), any(SendMessageRequestHeader.class), anyLong(), any(CommunicationMode.class),
             nullable(SendMessageContext.class), any(DefaultMQProducerImpl.class))).thenCallRealMethod();
@@ -130,7 +129,7 @@ public class TransactionMQProducerWithOpenTracingTest {
 
     @Test
     public void testSendMessageSync_WithTrace_Success() throws RemotingException, InterruptedException, MQBrokerException, MQClientException {
-        producer.getDefaultMQProducerImpl().getmQClientFactory().registerProducer(producerGroupTraceTemp, producer.getDefaultMQProducerImpl());
+        producer.getDefaultMQProducerImpl().getMqClientFactory().registerProducer(producerGroupTraceTemp, producer.getDefaultMQProducerImpl());
         when(mQClientAPIImpl.getTopicRouteInfoFromNameServer(anyString(), anyLong())).thenReturn(createTopicRoute());
         producer.sendMessageInTransaction(message, null);
 
@@ -152,18 +151,18 @@ public class TransactionMQProducerWithOpenTracingTest {
     public static TopicRouteData createTopicRoute() {
         TopicRouteData topicRouteData = new TopicRouteData();
 
-        topicRouteData.setFilterServerTable(new HashMap<String, List<String>>());
-        List<BrokerData> brokerDataList = new ArrayList<BrokerData>();
+        topicRouteData.setFilterServerTable(new HashMap<>());
+        List<BrokerData> brokerDataList = new ArrayList<>();
         BrokerData brokerData = new BrokerData();
         brokerData.setBrokerName("BrokerA");
         brokerData.setCluster("DefaultCluster");
-        HashMap<Long, String> brokerAddrs = new HashMap<Long, String>();
+        HashMap<Long, String> brokerAddrs = new HashMap<>();
         brokerAddrs.put(0L, "127.0.0.1:10911");
         brokerData.setBrokerAddrs(brokerAddrs);
         brokerDataList.add(brokerData);
         topicRouteData.setBrokerDatas(brokerDataList);
 
-        List<QueueData> queueDataList = new ArrayList<QueueData>();
+        List<QueueData> queueDataList = new ArrayList<>();
         QueueData queueData = new QueueData();
         queueData.setBrokerName("BrokerA");
         queueData.setPerm(6);
