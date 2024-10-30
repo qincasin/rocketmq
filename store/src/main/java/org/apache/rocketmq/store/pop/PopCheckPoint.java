@@ -21,24 +21,30 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class PopCheckPoint implements Comparable<PopCheckPoint> {
+    // 起始偏移量
     @JSONField(name = "so")
     private long startOffset;
+    // 消息拉取时间
     @JSONField(name = "pt")
     private long popTime;
     @JSONField(name = "it")
     private long invisibleTime;
+    // 位图 收到ACK消息则把对应位设为1
     @JSONField(name = "bm")
     private int bitMap;
+    // 消息数量
     @JSONField(name = "n")
     private byte num;
     @JSONField(name = "q")
     private int queueId;
     @JSONField(name = "t")
     private String topic;
+    // 消费组
     @JSONField(name = "c")
     private String cid;
     @JSONField(name = "ro")
     private long reviveOffset;
+    // 消息增量偏移量
     @JSONField(name = "d")
     private List<Integer> queueOffsetDiff;
     @JSONField(name = "bn")
