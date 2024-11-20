@@ -48,7 +48,7 @@ public class AclClient {
 
     private static final String ACL_ACCESS_KEY = "RocketMQ";
 
-    private static final String ACL_SECRET_KEY = "1234567";
+    private static final String ACL_SECRET_KEY = "12345678";
 
     public static void main(String[] args) throws MQClientException, InterruptedException {
         producer();
